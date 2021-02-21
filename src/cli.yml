@@ -1,0 +1,27 @@
+name: rup
+#version: "1.0"
+author: Dmitry Shinkaruk <dimashink@gmail.com>
+about: rup universal pinger
+args:
+  - config:
+      short: c
+      long: config
+      value_name: FILE
+      help: Sets a custom config file
+      takes_value: true
+  - protocol:
+      short: p
+      long: protocol
+      value_name: PROTOCOL
+      help: Set protocol to use for ping
+      takes_value: true
+  - local-port:
+      long: local-port
+      value_name: LOCAL_PORT
+      help: Set port for TCP/UDP to use for ping'ing
+      takes_value: true
+  - address:
+      long: address
+      value_name: ADDRESS
+      help: Set address to ping
+      takes_value: true

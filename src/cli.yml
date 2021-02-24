@@ -1,27 +1,45 @@
 name: rup
-#version: "1.0"
-author: Dmitry Shinkaruk <dimashink@gmail.com>
 about: rup universal pinger
 args:
-  - config:
-      short: c
-      long: config
-      value_name: FILE
-      help: Sets a custom config file
-      takes_value: true
-  - protocol:
-      short: p
-      long: protocol
-      value_name: PROTOCOL
-      help: Set protocol to use for ping
-      takes_value: true
-  - local-port:
-      long: local-port
-      value_name: LOCAL_PORT
-      help: Set port for TCP/UDP to use for ping'ing
-      takes_value: true
-  - address:
-      long: address
-      value_name: ADDRESS
-      help: Set address to ping
-      takes_value: true
+    - server:
+        long: server
+        help: Set server mode - echo responce to requests.
+        takes_value: false
+        conflicts_with:
+          - client
+    - client:
+        long: client
+        help: Set client mode - generates echo requests.
+        takes_value: false
+        conflicts_with:
+          - server
+    - protocol:
+          long: protocol
+          value_name: PROTOCOL
+          help: Set protocol to use for ping.
+          possible_values: [ tcp, udp, icmp ]
+          takes_value: true
+    - remote-address:
+          long: remote-address
+          value_name: REMOTE_ADDRESS
+          help: Set address to ping
+          takes_value: true
+    - remote-port:
+          long: remote-port
+          value_name: REMOTE_PORT
+          help: Set port to use for TCP/UDP ping
+          takes_value: true
+          max_values: 65536
+          min_values: 1
+    - local-address:
+        long: local-address
+        value_name: LOCAL_ADDRESS
+        help: Set address to listen
+        takes_value: true
+    - local-port:
+        long: local-port
+        value_name: LOCAL_PORT
+        help: Set port to listen to
+        takes_value: true
+        max_values: 65536
+        min_values: 1

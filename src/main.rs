@@ -1,10 +1,11 @@
 #[macro_use]
 extern crate clap;
 use clap::App;
-use std::net::{TcpListener, TcpStream, Shutdown};
+use std::net::{TcpListener, TcpStream, Shutdown, UdpSocket};
 use std::io::{Result, Read, Write};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::str;
 
 fn tcp_server_handler(mut stream: TcpStream) {
     let peer_addr = stream.peer_addr().unwrap();
@@ -62,10 +63,11 @@ fn run_tcp_client(address: &str, port: &str) -> std::io::Result<()> {
                         break;
                     },
                     Ok(_) => {
-                        println!("RTT = {}", now.elapsed().as_micros())
+                        println!("RTT = {} us", now.elapsed().as_micros())
                     },
                     Err(_) => {
-                        println!("An error occurred, terminating connection with {}", stream.peer_addr().unwrap());
+                        println!("An error occurred, terminating connection with {}",
+                                 stream.peer_addr().unwrap());
                         break;
                     }
                 }
@@ -78,6 +80,34 @@ fn run_tcp_client(address: &str, port: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn run_udp_server(local_address: &str, local_port: &str) -> std::io::Result<()> {
+    println!("Running UDP server listening {}:{}", local_address, local_port);
+    let mut socket = UdpSocket::bind(format!("{}:{}", local_address, local_port))?;
+
+    loop {
+        let mut buf = [0; 1024];
+        let (amt, src) = socket.recv_from(&mut buf)?;
+        socket.send_to(&buf[..amt], &src)?;
+    }
+    Ok(())
+}
+
+fn run_udp_client(address: &str, port: &str) -> std::io::Result<()> {
+    println!("Running UDP client sending pings to {}:{}", address, port);
+    let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(Duration::new(1, 0)))?;
+
+    loop {
+        let snd_buf = b"Ping message";
+        let mut rcv_buf = [0; 1024];
+
+        socket.send_to(snd_buf, format!("{}:{}", address, port))?;
+        let now = Instant::now();
+        let (amt, src) = socket.recv_from(&mut rcv_buf)?;
+        println!("RTT = {} us", now.elapsed().as_micros())
+    }
+    Ok(())
+}
 
 fn main() -> std::io::Result<()> {
     let yaml = load_yaml!("cli.yml");
@@ -93,12 +123,20 @@ fn main() -> std::io::Result<()> {
         let local_address = matches.value_of("local-address").unwrap_or("0.0.0.0");
         let local_port = matches.value_of("local-port").unwrap();
 
-        run_tcp_server("0.0.0.0", local_port)
+        match protocol {
+            "tcp" => run_tcp_server("0.0.0.0", local_port),
+            "udp" => run_udp_server("0.0.0.0", local_port),
+            _ => unimplemented!(),
+        }
     } else if client_mode {
         let remote_port = matches.value_of("remote-port").unwrap();
         let remote_address = matches.value_of("remote-address").unwrap();
 
-        run_tcp_client(remote_address, remote_port)
+        match protocol {
+            "tcp" => run_tcp_client(remote_address, remote_port),
+            "udp" => run_udp_client(remote_address, remote_port),
+            _ => unimplemented!(),
+        }
     } else if protocol == "icmp" {
         unimplemented!()
     } else {

@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate clap;
 use clap::App;
-use std::net::{TcpListener, TcpStream, Shutdown, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket, SocketAddr};
 use std::io::{Result, Read, Write};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,17 +18,25 @@ fn tcp_server_handler(mut stream: TcpStream) {
                 break;
             },
             Ok(n) => {
-                stream.write(&read[0..n]);
+                match stream.write(&read[0..n]) {
+                    Err(e) => {
+                        println!("An error occurred during writing echo, \
+                                  terminating connection with {}: {}",
+                                  peer_addr, e);
+                    },
+                    _ => continue,
+                }
             },
             Err(_) => {
-                println!("An error occurred, terminating connection with {}", peer_addr);
+                println!("An error occurred during reading request, \
+                          terminating connection with {}", peer_addr);
                 break;
             }
         }
     }
 }
 
-fn run_tcp_server(local_address: &str, local_port: &str) -> std::io::Result<()> {
+fn run_tcp_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running TCP server listening {}:{}", local_address, local_port);
     let listener = TcpListener::bind(format!("{}:{}", local_address, local_port))?;
 
@@ -36,7 +44,7 @@ fn run_tcp_server(local_address: &str, local_port: &str) -> std::io::Result<()> 
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    tcp_server_handler(stream)
+                    tcp_server_handler(stream);
                 });
             }
             Err(e) => {
@@ -47,7 +55,7 @@ fn run_tcp_server(local_address: &str, local_port: &str) -> std::io::Result<()> 
     Ok(())
 }
 
-fn run_tcp_client(address: &str, port: &str) -> std::io::Result<()> {
+fn run_tcp_client(address: &str, port: &str) -> Result<()> {
     println!("Running TCP client connecting {}:{}", address, port);
     match TcpStream::connect(format!("{}:{}", address, port)) {
         Ok(mut stream) => {
@@ -80,21 +88,27 @@ fn run_tcp_client(address: &str, port: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn run_udp_server(local_address: &str, local_port: &str) -> std::io::Result<()> {
+fn run_udp_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running UDP server listening {}:{}", local_address, local_port);
-    let mut socket = UdpSocket::bind(format!("{}:{}", local_address, local_port))?;
+    let socket = UdpSocket::bind(format!("{}:{}", local_address, local_port))?;
 
+    let mut source_addr: Option<SocketAddr> = None;
     loop {
         let mut buf = [0; 1024];
         let (amt, src) = socket.recv_from(&mut buf)?;
+
+        if source_addr.is_none() || source_addr.unwrap() != src {
+            source_addr = Some(src.clone());
+            println!("Receiving pings from {}", src);
+        }
+
         socket.send_to(&buf[..amt], &src)?;
     }
-    Ok(())
 }
 
-fn run_udp_client(address: &str, port: &str) -> std::io::Result<()> {
+fn run_udp_client(address: &str, port: &str) -> Result<()> {
     println!("Running UDP client sending pings to {}:{}", address, port);
-    let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_read_timeout(Some(Duration::new(1, 0)))?;
 
     loop {
@@ -103,13 +117,19 @@ fn run_udp_client(address: &str, port: &str) -> std::io::Result<()> {
 
         socket.send_to(snd_buf, format!("{}:{}", address, port))?;
         let now = Instant::now();
-        let (amt, src) = socket.recv_from(&mut rcv_buf)?;
-        println!("RTT = {} us", now.elapsed().as_micros())
+
+        match socket.recv(&mut rcv_buf) {
+            Ok(_) => {
+                println!("RTT = {} us", now.elapsed().as_micros())
+            },
+            Err(e) => {
+                println!("Error reading: {}", e);
+            }
+        }
     }
-    Ok(())
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<()> {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
 
@@ -124,8 +144,8 @@ fn main() -> std::io::Result<()> {
         let local_port = matches.value_of("local-port").unwrap();
 
         match protocol {
-            "tcp" => run_tcp_server("0.0.0.0", local_port),
-            "udp" => run_udp_server("0.0.0.0", local_port),
+            "tcp" => run_tcp_server(local_address, local_port),
+            "udp" => run_udp_server(local_address, local_port),
             _ => unimplemented!(),
         }
     } else if client_mode {

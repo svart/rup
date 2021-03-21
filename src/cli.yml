@@ -6,13 +6,13 @@ args:
         help: Set server mode - echo responce to requests.
         takes_value: false
         conflicts_with:
-          - client
+            - client
     - client:
-        long: client
-        help: Set client mode - generates echo requests.
-        takes_value: false
-        conflicts_with:
-          - server
+          long: client
+          help: Set client mode - generates echo requests.
+          takes_value: false
+          conflicts_with:
+              - server
     - protocol:
           long: protocol
           value_name: PROTOCOL
@@ -32,14 +32,22 @@ args:
           max_values: 65536
           min_values: 1
     - local-address:
-        long: local-address
-        value_name: LOCAL_ADDRESS
-        help: Set address to listen
-        takes_value: true
+          long: local-address
+          value_name: LOCAL_ADDRESS
+          help: Set address to listen
+          takes_value: true
     - local-port:
-        long: local-port
-        value_name: LOCAL_PORT
-        help: Set port to listen to
-        takes_value: true
-        max_values: 65536
-        min_values: 1
+          long: local-port
+          value_name: LOCAL_PORT
+          help: Set port to listen to
+          takes_value: true
+          max_values: 65536
+          min_values: 1
+    - interval:
+          long: interval
+          value_name: INTERVAL
+          help: Set interval in ms to send echo requests
+          takes_value: true
+          min_values: 1
+          requires:
+              - client

@@ -1,12 +1,18 @@
 #[macro_use]
 extern crate clap;
-use clap::App;
-use std::net::{TcpListener, TcpStream, UdpSocket, SocketAddr};
+use std::net::{TcpListener, TcpStream};
 use std::io::{Result, Read, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::str;
+use std::sync::Arc;
+use std::cmp::max;
+use clap::App;
 
+use mio::net::UdpSocket;
+use mio::{Events, Interest, Poll, Token, Waker};
+
+// TODO: move TCP on MIO
 fn tcp_server_handler(mut stream: TcpStream) {
     let peer_addr = stream.peer_addr().unwrap();
     println!("Incoming connection from {}", peer_addr);
@@ -88,42 +94,107 @@ fn run_tcp_client(address: &str, port: &str) -> Result<()> {
     Ok(())
 }
 
+const UDP_SOCKET: Token = Token(0);
+const TIMEOUT: Token = Token(1);
+
 fn run_udp_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running UDP server listening {}:{}", local_address, local_port);
-    let socket = UdpSocket::bind(format!("{}:{}", local_address, local_port))?;
 
-    let mut source_addr: Option<SocketAddr> = None;
+    let mut socket = UdpSocket::bind(format!("{}:{}", local_address, local_port).parse().unwrap())?;
+
+    let mut poll = Poll::new()?;
+    let mut events = Events::with_capacity(128);
+    poll.registry()
+        .register(&mut socket, UDP_SOCKET, Interest::READABLE)?;
+
     loop {
-        let mut buf = [0; 1024];
-        let (amt, src) = socket.recv_from(&mut buf)?;
-
-        if source_addr.is_none() || source_addr.unwrap() != src {
-            source_addr = Some(src.clone());
-            println!("Receiving pings from {}", src);
+        poll.poll(&mut events, None)?;
+        for event in events.iter() {
+            if event.is_readable() {
+                let mut buf = [0; 1024];
+                let (amt, src) = socket.recv_from(&mut buf).unwrap();
+                socket.send_to(&buf[..amt], src).unwrap();
+            }
         }
-
-        socket.send_to(&buf[..amt], &src)?;
     }
 }
 
-fn run_udp_client(address: &str, port: &str) -> Result<()> {
+// TODO: Set ttl on the messages
+// TODO: Set length of the messages
+
+fn run_udp_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
+    // Times in millis
+    const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
+    let read_response_timeout = match interval {
+        Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value),
+        None => DEFAULT_READ_RESPONSE_TIMEOUT
+    };
+
     println!("Running UDP client sending pings to {}:{}", address, port);
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(Duration::new(1, 0)))?;
 
+    let mut socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap())?;
+
+    let mut poll = Poll::new()?;
+    let mut events = Events::with_capacity(128);
+    poll.registry()
+        .register(&mut socket,
+                  UDP_SOCKET,
+                  Interest::READABLE)?;
+
+    if interval.is_some() {
+        let waker = Arc::new(Waker::new(poll.registry(), TIMEOUT)?);
+        let waker1 = waker.clone();
+        let _handle = thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(interval.unwrap()));
+                waker1.wake().expect("unable to wake");
+            }
+        });
+    }
+
+    // TODO: Set message ID into each echo request
+    // TODO: Move message sending into separate function
+    let snd_buf = b"Ping message";
+    let mut now: Instant = Instant::now();
+    socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
     loop {
-        let snd_buf = b"Ping message";
-        let mut rcv_buf = [0; 1024];
+        println!("polling timeout {}", read_response_timeout);
+        poll.poll(&mut events, Some(Duration::from_millis(read_response_timeout)))?;
 
-        socket.send_to(snd_buf, format!("{}:{}", address, port))?;
-        let now = Instant::now();
+        // poll timeout, no events
+        if events.is_empty() {
+            println!("Receive timeout");
+            now = Instant::now();
+            socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+            continue;
+        }
 
-        match socket.recv(&mut rcv_buf) {
-            Ok(_) => {
-                println!("RTT = {} us", now.elapsed().as_micros())
-            },
-            Err(e) => {
-                println!("Error reading: {}", e);
+        for event in events.iter() {
+            match event.token() {
+                UDP_SOCKET => {
+                    if event.is_readable() {
+                        let mut rcv_buf = [0; 1024];
+                        match socket.recv(&mut rcv_buf) {
+                            Ok(_) => {
+                                println!("RTT = {} us", now.elapsed().as_micros());
+                            },
+                            Err(e) => {
+                                println!("Error reading: {}", e);
+                            }
+                        }
+                        if interval.is_none() {
+                            now = Instant::now();
+                            socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+                        }
+                    }
+                }
+                TIMEOUT => {
+                    now = Instant::now();
+                    socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+                }
+                Token(_) => {
+                    println!("Something went wrong");
+                }
             }
         }
     }
@@ -151,10 +222,14 @@ fn main() -> Result<()> {
     } else if client_mode {
         let remote_port = matches.value_of("remote-port").unwrap();
         let remote_address = matches.value_of("remote-address").unwrap();
+        let interval: Option<u64> = match matches.value_of("interval") {
+            Some(value) => Some(value.parse().unwrap()),
+            None => None,
+        };
 
         match protocol {
             "tcp" => run_tcp_client(remote_address, remote_port),
-            "udp" => run_udp_client(remote_address, remote_port),
+            "udp" => run_udp_client(remote_address, remote_port, interval),
             _ => unimplemented!(),
         }
     } else if protocol == "icmp" {

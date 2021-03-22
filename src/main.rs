@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate clap;
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::io::{Result, Read, Write};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -122,11 +122,17 @@ fn run_udp_server(local_address: &str, local_port: &str) -> Result<()> {
 // TODO: Set ttl on the messages
 // TODO: Set length of the messages
 
+fn send_buf_to_udp_sock(socket: &UdpSocket ,buf: &[u8], target: SocketAddr) -> Result<Instant> {
+    let now = Instant::now();
+    socket.send_to(buf, target)?;
+    return Ok(now);
+}
+
 fn run_udp_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     // Times in millis
     const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
     let read_response_timeout = match interval {
-        Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value),
+        Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value * 2),
         None => DEFAULT_READ_RESPONSE_TIMEOUT
     };
 
@@ -143,29 +149,25 @@ fn run_udp_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
 
     if interval.is_some() {
         let waker = Arc::new(Waker::new(poll.registry(), TIMEOUT)?);
-        let waker1 = waker.clone();
         let _handle = thread::spawn(move || {
             loop {
                 thread::sleep(Duration::from_millis(interval.unwrap()));
-                waker1.wake().expect("unable to wake");
+                waker.wake().expect("unable to wake");
             }
         });
     }
 
     // TODO: Set message ID into each echo request
-    // TODO: Move message sending into separate function
     let snd_buf = b"Ping message";
-    let mut now: Instant = Instant::now();
-    socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+    let target_addr: SocketAddr = format!("{}:{}", address, port).parse().unwrap();
+    let mut now = send_buf_to_udp_sock(&socket, snd_buf, target_addr.clone())?;
     loop {
-        println!("polling timeout {}", read_response_timeout);
         poll.poll(&mut events, Some(Duration::from_millis(read_response_timeout)))?;
 
         // poll timeout, no events
         if events.is_empty() {
             println!("Receive timeout");
-            now = Instant::now();
-            socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+            now = send_buf_to_udp_sock(&socket, snd_buf, target_addr.clone())?;
             continue;
         }
 
@@ -183,14 +185,12 @@ fn run_udp_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
                             }
                         }
                         if interval.is_none() {
-                            now = Instant::now();
-                            socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+                            now = send_buf_to_udp_sock(&socket, snd_buf, target_addr.clone())?;
                         }
                     }
                 }
                 TIMEOUT => {
-                    now = Instant::now();
-                    socket.send_to(snd_buf, format!("{}:{}", address, port).parse().unwrap())?;
+                    now = send_buf_to_udp_sock(&socket, snd_buf, target_addr.clone())?;
                 }
                 Token(_) => {
                     println!("Something went wrong");

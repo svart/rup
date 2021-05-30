@@ -10,8 +10,11 @@ use std::cmp::max;
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token, Waker};
 
-const UDP_SOCKET: Token = Token(0);
-const TIMEOUT: Token = Token(1);
+const TOKEN_UDP_SOCKET: Token = Token(0);
+const TOKEN_TIMEOUT: Token = Token(1);
+
+const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
+const UDP_MSG_LEN: u8 = 8;
 
 pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running UDP server listening {}:{}", local_address, local_port);
@@ -21,14 +24,14 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
     poll.registry()
-        .register(&mut socket, UDP_SOCKET, Interest::READABLE)?;
+        .register(&mut socket, TOKEN_UDP_SOCKET, Interest::READABLE)?;
 
     loop {
         poll.poll(&mut events, None)?;
         for event in events.iter() {
             if event.is_readable() {
                 loop {
-                    let mut buf = [0; 8];
+                    let mut buf = [0; UDP_MSG_LEN];
                     match socket.recv_from(&mut buf) {
                         Ok((amt, src)) => {
                             socket.send_to(&buf[..amt], src).unwrap();
@@ -66,7 +69,6 @@ struct TimeStamp {
 // TODO: Refactor this function. It is too big now.
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     // Times in millis
-    const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
     let read_response_timeout = match interval {
         Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value * 2),
         None => DEFAULT_READ_RESPONSE_TIMEOUT
@@ -83,11 +85,11 @@ pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
     let mut events = Events::with_capacity(1024);
     poll.registry()
         .register(&mut socket,
-                  UDP_SOCKET,
+                  TOKEN_UDP_SOCKET,
                   Interest::READABLE)?;
 
     if interval.is_some() {
-        let waker = Arc::new(Waker::new(poll.registry(), TIMEOUT)?);
+        let waker = Arc::new(Waker::new(poll.registry(), TOKEN_TIMEOUT)?);
         let _handle = thread::spawn(move || {
             loop {
                 thread::sleep(Duration::from_millis(interval.unwrap()));
@@ -119,10 +121,10 @@ pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
 
         for event in events.iter() {
             match event.token() {
-                UDP_SOCKET => {
+                TOKEN_UDP_SOCKET => {
                     if event.is_readable() {
                         loop {
-                            let mut rcv_buf = [0; 8];
+                            let mut rcv_buf = [0; UDP_MSG_LEN];
                             match socket.recv(&mut rcv_buf) {
                                 Ok(_) => {
                                     let recv_msg_id = u64::from_be_bytes(rcv_buf);
@@ -167,7 +169,7 @@ pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
                         }
                     }
                 }
-                TIMEOUT => {
+                TOKEN_TIMEOUT => {
                     match send_buf_to_udp_sock(&socket,
                                                target_addr.clone(),
                                                &mut msg_id_counter,

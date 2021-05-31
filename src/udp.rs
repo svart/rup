@@ -14,7 +14,7 @@ const TOKEN_UDP_SOCKET: Token = Token(0);
 const TOKEN_TIMEOUT: Token = Token(1);
 
 const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
-const UDP_MSG_LEN: u8 = 8;
+const UDP_MSG_LEN: usize = 8;
 
 pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running UDP server listening {}:{}", local_address, local_port);

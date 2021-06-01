@@ -61,7 +61,7 @@ pub fn run_client(address: &str, port: &str) -> Result<()> {
                 stream.write(msg).unwrap();
                 let now = Instant::now();
 
-                let mut read = [0; 1024];
+                let mut read = [0; 12];
                 match stream.read(&mut read) {
                     Ok(0) => {
                         println!("Connection closed: {}", stream.peer_addr().unwrap());

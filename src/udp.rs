@@ -1,14 +1,14 @@
-use std::collections::VecDeque;
 use std::io::Result;
-use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
-use std::cmp::{max, Ordering};
+use std::time::Duration;
+use std::cmp::{max};
 
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token, Waker};
+
+use crate::client::{Client, Pinger};
 
 const TOKEN_UDP_SOCKET: Token = Token(0);
 const TOKEN_TIMEOUT: Token = Token(1);
@@ -49,23 +49,6 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
 // TODO: Set tos on the messages
 // TODO: Set length of the messages
 
-fn send_buf_to_udp_sock(socket: &UdpSocket,
-                        target: SocketAddr,
-                        current_counter: &mut u64,
-                        msg_queue: &mut VecDeque<TimeStamp>) -> Result<Instant> {
-    let buf: [u8; 8] = current_counter.to_be_bytes();
-    let now = Instant::now();
-    socket.send_to(&buf, target)?;
-    msg_queue.push_back(TimeStamp{id: *current_counter, timestamp: now});
-    *current_counter += 1;
-    return Ok(now);
-}
-
-struct TimeStamp {
-    id: u64,
-    timestamp: Instant,
-}
-
 fn setup_polling(poller: Poll, socket: &mut UdpSocket, send_packet_interval: Option<u64>) -> Result<Poll> {
     poller.registry()
           .register(socket,
@@ -90,78 +73,40 @@ pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()
         Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value * 2),
         None => DEFAULT_READ_RESPONSE_TIMEOUT
     };
-
-    let mut ts_queue: VecDeque<TimeStamp> = VecDeque::new();
-    let mut msg_id_counter: u64 = 0;
-
     println!("Running UDP client sending pings to {}:{}", address, port);
 
-    let mut socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap())?;
-    let mut poll = setup_polling(Poll::new()?, &mut socket, interval)?;
+    let mut client = <Client<UdpSocket>>::new(address, port, interval).unwrap();
+    let mut poll = setup_polling(Poll::new()?,
+                                      &mut client.socket,
+                                      client.send_interval)?;
     let mut events = Events::with_capacity(1024);
-    let target_addr: SocketAddr = format!("{}:{}", address, port).parse().unwrap();
-
-    let mut now = send_buf_to_udp_sock(&socket,
-                                        target_addr.clone(),
-                                 &mut msg_id_counter,
-                                    &mut ts_queue,
-    )?;
-
+    let mut now = client.send_req()?;
     loop {
         poll.poll(&mut events, Some(Duration::from_millis(read_response_timeout)))?;
         // poll timeout, no events
         if events.is_empty() {
             println!("Receive timeout");
-            ts_queue.pop_front();
-            now = send_buf_to_udp_sock(&socket,
-                                 target_addr.clone(),
-                          &mut msg_id_counter,
-                             &mut ts_queue,
-            )?;
+            client.ts_queue.pop_front();
+            now = client.send_req()?;
             continue;
         }
         for event in events.iter() {
             match event.token() {
                 TOKEN_UDP_SOCKET => {
                     if event.is_readable() {
-                        process_udp_read(&socket, &mut ts_queue, interval,  &mut now);
+                        for rtt in client.recv_resp(now)? {
+                            println!("RTT = {} us", rtt)
+                        }
                         if interval.is_none() {
-                            now = send_buf_to_udp_sock(&socket,
-                                                 target_addr.clone(),
-                                          &mut msg_id_counter,
-                                             &mut ts_queue)?;
+                            now = client.send_req()?;
                         }
                     }
                 }
                 TOKEN_TIMEOUT => {
-                    now = send_buf_to_udp_sock(&socket,
-                                         target_addr.clone(),
-                                  &mut msg_id_counter,
-                                     &mut ts_queue)?;
+                    now = client.send_req()?;
                 }
                 Token(_) => unreachable!(),
             }
-        }
-    }
-}
-
-fn process_udp_read(socket: &UdpSocket,
-                    ts_queue: &mut VecDeque<TimeStamp>,
-                    interval: Option<u64>,
-                    now: &Instant) {
-    let mut rcv_buf = [0; UDP_MSG_LEN];
-    while let Ok(_) = socket.recv(&mut rcv_buf) {
-        let recv_msg_id = u64::from_be_bytes(rcv_buf);
-        while let Some(time_stamp) = ts_queue.pop_front() {
-            match recv_msg_id.cmp(&time_stamp.id) {
-                Ordering::Greater => continue,
-                Ordering::Equal => println!("RTT = {} us", time_stamp.timestamp.elapsed().as_micros()),
-                Ordering::Less => ts_queue.push_front(time_stamp),
-            }
-            break;
-        }
-        if now.elapsed().as_millis() >= interval.unwrap() as u128 {
-            break;
         }
     }
 }

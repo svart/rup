@@ -1,5 +1,6 @@
 mod tcp;
 mod udp;
+mod client;
 
 #[macro_use]
 extern crate clap;

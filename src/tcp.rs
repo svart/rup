@@ -100,33 +100,11 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
 
 pub fn run_client(address: &str, port: &str) -> Result<()> {
     println!("Running TCP client connecting to {}:{}", address, port);
-    match TcpStream::connect(format!("{}:{}", address, port)) {
-        Ok(mut stream) => {
-            loop {
-                let msg = b"Ping message";
-                stream.write(msg).unwrap();
-                let now = Instant::now();
-
-                let mut read = [0; 12];
-                match stream.read(&mut read) {
-                    Ok(0) => {
-                        println!("Connection closed: {}", stream.peer_addr().unwrap());
-                        break;
-                    },
-                    Ok(_) => {
-                        println!("RTT = {} us", now.elapsed().as_micros())
-                    },
-                    Err(_) => {
-                        println!("An error occurred, terminating connection with {}",
-                                 stream.peer_addr().unwrap());
-                        break;
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("Failed to connect: {}", e);
+    let mut client = <Client<TcpStream>>::new(address, port, None).unwrap();
+    loop {
+        let now = client.send_req()?;
+        for rtt in client.recv_resp(now)? {
+            println!("RTT = {} us", rtt)
         }
     }
-    Ok(())
 }

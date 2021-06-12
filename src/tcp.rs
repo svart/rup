@@ -49,12 +49,11 @@ impl Pinger for Client<TcpStream> {
     }
 }
 
-// TODO: move TCP on MIO
 fn server_handler(mut stream: TcpStream) {
     let peer_addr = stream.peer_addr().unwrap();
     println!("Incoming connection from {}", peer_addr);
     loop {
-        let mut read = [0; 1024];
+        let mut read = [0; PING_MSG_LEN];
         match stream.read(&mut read) {
             Ok(0) => {
                 println!("Connection closed: {}", peer_addr);
@@ -81,8 +80,8 @@ fn server_handler(mut stream: TcpStream) {
 
 pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
     println!("Running TCP server listening {}:{}", local_address, local_port);
-    let listener = TcpListener::bind(format!("{}:{}", local_address, local_port))?;
 
+    let listener = TcpListener::bind(format!("{}:{}", local_address, local_port))?;
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

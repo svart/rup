@@ -1,7 +1,14 @@
-use std::collections::VecDeque;
-use std::time::Instant;
-use std::net::SocketAddr;
 use std::cmp::Ordering;
+use std::collections::VecDeque;
+use std::io::Result;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+use mio::{Interest, Poll, Waker};
+use mio::event::Source;
+
+use crate::common::{TOKEN_SEND_TIMEOUT, TOKEN_READ_SOCKET};
 
 pub(crate) struct TimeStamp {
     pub id: u64,
@@ -29,4 +36,20 @@ impl<T> Client<T> {
     }
 }
 
+pub fn setup_client_polling<T: Source>(socket: &mut T, send_packet_interval: Option<u64>) -> Result<Poll> {
+    let poller = Poll::new()?;
+    poller.registry()
+          .register(socket, TOKEN_READ_SOCKET, Interest::READABLE)?;
+
+    if send_packet_interval.is_some() {
+        let waker = Arc::new(Waker::new(poller.registry(), TOKEN_SEND_TIMEOUT)?);
+        let _handle = thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(send_packet_interval.unwrap()));
+                waker.wake().expect("unable to wake");
+            }
+        });
+    }
+    Ok(poller)
+}
 

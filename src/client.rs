@@ -7,8 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use mio::{Interest, Poll, Waker};
 use mio::event::Source;
+use mio::{Events, Token};
+use std::cmp::max;
 
-use crate::common::{TOKEN_SEND_TIMEOUT, TOKEN_READ_SOCKET};
+use crate::common::{DEFAULT_READ_RESPONSE_TIMEOUT, TOKEN_SEND_TIMEOUT, TOKEN_READ_SOCKET};
+use crate::pinger::Pinger;
 
 pub(crate) struct TimeStamp {
     pub id: u64,
@@ -23,7 +26,9 @@ pub(crate) struct Client<T> {
     pub socket: T,
 }
 
-impl<T> Client<T> {
+impl<T> Client<T> where
+    T: Source,
+    Client<T>: Pinger {
     pub fn timestamps_walk(&mut self, msg_id: u64, rtts: &mut Vec<u128>) {
         while let Some(time_stamp) = self.ts_queue.pop_front() {
             match msg_id.cmp(&time_stamp.id) {
@@ -32,6 +37,45 @@ impl<T> Client<T> {
                 Ordering::Less => self.ts_queue.push_front(time_stamp),
             }
             break;
+        }
+    }
+
+    pub fn ping_loop(&mut self) -> Result<()> {
+        let read_response_timeout = match self.send_interval {
+            Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value * 2),
+            None => DEFAULT_READ_RESPONSE_TIMEOUT
+        };
+
+        let mut poll = setup_client_polling(&mut self.socket, self.send_interval)?;
+        let mut events = Events::with_capacity(1024);
+        let mut now = self.send_req()?;
+        loop {
+            poll.poll(&mut events, Some(Duration::from_millis(read_response_timeout)))?;
+            // poll timeout, no events
+            if events.is_empty() {
+                println!("Receive timeout");
+                self.ts_queue.pop_front();
+                now = self.send_req()?;
+                continue;
+            }
+            for event in events.iter() {
+                match event.token() {
+                    TOKEN_READ_SOCKET => {
+                        if event.is_readable() {
+                            for rtt in self.recv_resp(now)? {
+                                println!("RTT = {} us", rtt)
+                            }
+                            if self.send_interval.is_none() {
+                                now = self.send_req()?;
+                            }
+                        }
+                    }
+                    TOKEN_SEND_TIMEOUT => {
+                        now = self.send_req()?;
+                    }
+                    Token(_) => unreachable!(),
+                }
+            }
         }
     }
 }

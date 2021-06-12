@@ -4,25 +4,28 @@ use std::thread;
 use std::time::Instant;
 use std::net::SocketAddr;
 use std::collections::VecDeque;
+use mio::net::TcpStream as MioTcpStream;
 
 use crate::client::{Client, TimeStamp};
 use crate::pinger::{Pinger, PING_MSG_LEN};
 
-impl Client<TcpStream> {
-    pub fn new(address: &str, port: &str, interval: Option<u64>) -> Result<Client<TcpStream>> {
+impl Client<MioTcpStream> {
+    pub fn new(address: &str, port: &str, interval: Option<u64>) -> Result<Client<MioTcpStream>> {
         let sock_addr: SocketAddr = format!("{}:{}", address, port).parse().unwrap();
-        let c: Client<TcpStream> = Client {
+        let tcp_sock = TcpStream::connect(sock_addr)?;
+        tcp_sock.set_nonblocking(true)?;
+        let c: Client<MioTcpStream> = Client {
             remote_address: sock_addr,
             send_interval: interval,
             ts_queue: VecDeque::new(),
             msg_id_counter: 0,
-            socket: TcpStream::connect(sock_addr)?
+            socket: MioTcpStream::from_std(tcp_sock),
         };
         Ok(c)
     }
 }
 
-impl Pinger for Client<TcpStream> {
+impl Pinger for Client<MioTcpStream> {
     fn send_req(&mut self) -> Result<Instant> {
         let buf: [u8; 8] = self.msg_id_counter.to_be_bytes();
         let now = Instant::now();
@@ -97,13 +100,8 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_client(address: &str, port: &str) -> Result<()> {
+pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     println!("Running TCP client connecting to {}:{}", address, port);
-    let mut client = <Client<TcpStream>>::new(address, port, None).unwrap();
-    loop {
-        let now = client.send_req()?;
-        for rtt in client.recv_resp(now)? {
-            println!("RTT = {} us", rtt)
-        }
-    }
+    let mut client = <Client<MioTcpStream>>::new(address, port, interval).unwrap();
+    return client.ping_loop();
 }

@@ -1,19 +1,15 @@
 use std::io::Result;
 use std::str;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::collections::VecDeque;
-use std::cmp::max;
 
 use mio::net::UdpSocket;
-use mio::{Events, Token};
+use mio::Events;
 
-use crate::common::{TOKEN_READ_SOCKET, TOKEN_SEND_TIMEOUT};
-use crate::client::{Client, TimeStamp, setup_client_polling};
+use crate::client::{Client, TimeStamp};
 use crate::pinger::{Pinger, PING_MSG_LEN};
 use crate::server::setup_server_polling;
 
-
-const DEFAULT_READ_RESPONSE_TIMEOUT: u64 = 1000;
 
 
 impl Client<UdpSocket> {
@@ -85,43 +81,7 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
 // TODO: Set length of the messages
 
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
-    // Time in millis
-    let read_response_timeout = match interval {
-        Some(value) => max(DEFAULT_READ_RESPONSE_TIMEOUT, value * 2),
-        None => DEFAULT_READ_RESPONSE_TIMEOUT
-    };
     println!("Running UDP client sending pings to {}:{}", address, port);
-
     let mut client = <Client<UdpSocket>>::new(address, port, interval)?;
-    let mut poll = setup_client_polling(&mut client.socket, interval)?;
-    let mut events = Events::with_capacity(1024);
-    let mut now = client.send_req()?;
-    loop {
-        poll.poll(&mut events, Some(Duration::from_millis(read_response_timeout)))?;
-        // poll timeout, no events
-        if events.is_empty() {
-            println!("Receive timeout");
-            client.ts_queue.pop_front();
-            now = client.send_req()?;
-            continue;
-        }
-        for event in events.iter() {
-            match event.token() {
-                TOKEN_READ_SOCKET => {
-                    if event.is_readable() {
-                        for rtt in client.recv_resp(now)? {
-                            println!("RTT = {} us", rtt)
-                        }
-                        if interval.is_none() {
-                            now = client.send_req()?;
-                        }
-                    }
-                }
-                TOKEN_SEND_TIMEOUT => {
-                    now = client.send_req()?;
-                }
-                Token(_) => unreachable!(),
-            }
-        }
-    }
+    return client.ping_loop();
 }

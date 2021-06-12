@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         };
 
         match protocol {
-            "tcp" => tcp::run_client(remote_address, remote_port),
+            "tcp" => tcp::run_client(remote_address, remote_port, interval),
             "udp" => udp::run_client(remote_address, remote_port, interval),
             _ => unimplemented!(),
         }

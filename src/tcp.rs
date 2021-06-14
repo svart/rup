@@ -50,6 +50,10 @@ impl Pinger for Client<MioTcpStream> {
         }
         Ok(rtts)
     }
+
+    fn send_err_handler(&self, err: std::io::Error) -> Result<()> {
+        Err(err)
+    }
 }
 
 fn server_handler(mut stream: TcpStream) {

@@ -47,6 +47,11 @@ impl Pinger for Client<UdpSocket> {
         }
         Ok(rtts)
     }
+
+    fn send_err_handler(&self, _: std::io::Error) -> Result<()> {
+        // Sending buffer here may be full due to frequent sending
+        Ok(())
+    }
 }
 
 pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
@@ -65,7 +70,7 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
                     let mut buf = [0; PING_MSG_LEN];
                     match socket.recv_from(&mut buf) {
                         Ok((amt, src)) => {
-                            socket.send_to(&buf[..amt], src).unwrap();
+                            socket.send_to(&buf[..amt], src)?;
                         }
                         Err(_) => {
                             break;

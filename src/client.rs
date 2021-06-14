@@ -71,7 +71,13 @@ impl<T> Client<T> where
                         }
                     }
                     TOKEN_SEND_TIMEOUT => {
-                        now = self.send_req()?;
+                        match self.send_req() {
+                            Ok(time) => now = time,
+                            Err(err) => {
+                                self.send_err_handler(err)?;
+                                break;
+                            }
+                        }
                     }
                     Token(_) => unreachable!(),
                 }

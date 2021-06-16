@@ -34,10 +34,7 @@ fn main() -> Result<()> {
     } else if client_mode {
         let remote_address = matches.value_of("remote-address").unwrap();
         let remote_port = matches.value_of("remote-port").unwrap();
-        let interval: Option<u64> = match matches.value_of("interval") {
-            Some(value) => Some(value.parse().unwrap()),
-            None => None,
-        };
+        let interval: Option<u64> = matches.value_of("interval").map(|value| value.parse().unwrap());
 
         match protocol {
             "tcp" => tcp::run_client(remote_address, remote_port, interval),

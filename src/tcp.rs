@@ -29,7 +29,7 @@ impl Pinger for Client<MioTcpStream> {
     fn send_req(&mut self) -> Result<Instant> {
         let buf: [u8; 8] = self.msg_id_counter.to_be_bytes();
         let now = Instant::now();
-        self.socket.write(&buf)?;
+        self.socket.write_all(&buf)?;
         self.ts_queue.push_back(TimeStamp{id: self.msg_id_counter, timestamp: now});
         self.msg_id_counter += 1;
         Ok(now)
@@ -107,5 +107,5 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     println!("Running TCP client connecting to {}:{}", address, port);
     let mut client = <Client<MioTcpStream>>::new(address, port, interval).unwrap();
-    return client.ping_loop();
+    client.ping_loop()
 }

@@ -86,16 +86,16 @@ impl<T> Client<T> where
     }
 }
 
-pub fn setup_client_polling<T: Source>(socket: &mut T, send_packet_interval: Option<u64>) -> Result<Poll> {
+fn setup_client_polling<T: Source>(socket: &mut T, send_packet_interval: Option<u64>) -> Result<Poll> {
     let poller = Poll::new()?;
     poller.registry()
           .register(socket, TOKEN_READ_SOCKET, Interest::READABLE)?;
 
-    if send_packet_interval.is_some() {
+    if let Some(interval) = send_packet_interval {
         let waker = Arc::new(Waker::new(poller.registry(), TOKEN_SEND_TIMEOUT)?);
         let _handle = thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(send_packet_interval.unwrap()));
+                thread::sleep(Duration::from_millis(interval));
                 waker.wake().expect("unable to wake");
             }
         });

@@ -38,7 +38,7 @@ impl Pinger for Client<UdpSocket> {
     fn recv_resp(&mut self, last_send: Instant) -> Result<Vec<u128>> {
         let mut rtts: Vec<u128> = Vec::new();
         let mut rcv_buf = [0; PING_MSG_LEN];
-        while let Ok(_) = self.socket.recv(&mut rcv_buf) {
+        while self.socket.recv(&mut rcv_buf).is_ok() {
             let recv_msg_id = u64::from_be_bytes(rcv_buf);
             self.timestamps_walk(recv_msg_id, &mut rtts);
             if last_send.elapsed().as_millis() >= self.send_interval.unwrap_or(0) as u128 {
@@ -88,5 +88,5 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     println!("Running UDP client sending pings to {}:{}", address, port);
     let mut client = <Client<UdpSocket>>::new(address, port, interval)?;
-    return client.ping_loop();
+    client.ping_loop()
 }

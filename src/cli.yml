@@ -49,5 +49,3 @@ args:
           help: Set interval in ms to send echo requests
           takes_value: true
           min_values: 1
-          requires:
-              - client

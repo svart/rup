@@ -31,7 +31,7 @@ impl Pinger for Client<UdpSocket> {
         let now = Instant::now();
         self.socket.send_to(&buf, self.remote_address)?;
         self.ts_queue.push_back(TimeStamp { id: self.msg_id_counter, timestamp: now });
-        self.msg_id_counter += 1;
+        self.msg_id_counter = self.msg_id_counter.wrapping_add(1);
         Ok(now)
     }
 
@@ -81,9 +81,6 @@ pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
         }
     }
 }
-
-// TODO: Set tos on the messages
-// TODO: Set length of the messages
 
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     println!("Running UDP client sending pings to {}:{}", address, port);

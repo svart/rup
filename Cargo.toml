@@ -1,6 +1,8 @@
 [package]
 name = "rup"
+description = "rup is a universal pinger"
 version = "0.1.0"
+repository = "https://github.com/svart/rup"
 authors = ["Dmitry Shinkaruk <dimashink@gmail.com>"]
 edition = "2018"
 
@@ -9,3 +11,4 @@ edition = "2018"
 [dependencies]
 clap = { version = "2.33", features = ["yaml"] }
 mio = { version = "0.7", features = ["os-poll", "net"] }
+icmp-socket = "0.1"

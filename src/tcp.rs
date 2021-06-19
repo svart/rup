@@ -31,7 +31,7 @@ impl Pinger for Client<MioTcpStream> {
         let now = Instant::now();
         self.socket.write_all(&buf)?;
         self.ts_queue.push_back(TimeStamp{id: self.msg_id_counter, timestamp: now});
-        self.msg_id_counter += 1;
+        self.msg_id_counter = self.msg_id_counter.wrapping_add(1);
         Ok(now)
     }
 

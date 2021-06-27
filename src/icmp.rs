@@ -1,10 +1,6 @@
 use std::io::Result;
 use std::str;
 use std::time::Instant;
-use std::collections::VecDeque;
-
-use mio::net::UdpSocket;
-use mio::Events;
 
 use std::{
     net::Ipv4Addr,
@@ -15,11 +11,6 @@ use icmp_socket::packet::WithEchoRequest;
 use icmp_socket::socket::IcmpSocket;
 use icmp_socket::*;
 
-use crate::client::{Client, TimeStamp};
-use crate::pinger::{Pinger, PING_MSG_LEN};
-use crate::server::setup_server_polling;
-
-
 fn packet_handler(pkt: Icmpv4Packet, send_time: Instant) -> Option<()> {
     let now = Instant::now();
     let elapsed = now - send_time;
@@ -29,7 +20,7 @@ fn packet_handler(pkt: Icmpv4Packet, send_time: Instant) -> Option<()> {
         payload: _,
     } = pkt.message
     {
-        println!( "RTT = {}", elapsed.as_micros());
+        println!( "RTT = {} us", elapsed.as_micros());
     } else {
         //eprintln!("Discarding non-reply {:?}", pkt);
         return None;

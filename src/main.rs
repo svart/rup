@@ -37,42 +37,35 @@ struct PingRTT {
 }
 
 
-// TODO: merge 2 transport threads together
-fn tx_transport_thread(from_client: Receiver<PingReqResp>,
-                       to_client: Sender<PingReqResp>) {
-    let socket = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
-    socket.connect("127.0.0.1:44444").expect("tx: connect function failed");
+fn transport(from_client: Receiver<PingReqResp>,
+             to_client: Sender<PingReqResp>) {
+    let tx_sock = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
+    let rx_sock = UdpSocket::bind("127.0.0.1:44444").unwrap();
+    tx_sock.connect("127.0.0.1:44444").expect("tx: connect function failed");
 
     loop {
-        match from_client.recv() {
-            Ok(mut req) => {
-                let index = req.index;
-                req.timestamp = Instant::now();
-                println!("tx: Received {index} from client");
-                socket.send(&index.to_be_bytes()).expect("tx: couldn't send message");
-                to_client.send(req).expect("tx: couldn't send transformed request to client");
+        if let Ok(mut req) = from_client.recv() {
+            // Sending request to socket
+            let index = req.index;
+            req.timestamp = Instant::now();
+            println!("tx: Received {index} from client");
+            tx_sock.send(&index.to_be_bytes()).expect("tx: couldn't send message");
+            to_client.send(req).expect("tx: couldn't send transformed request to client");
+
+            // Receiving request from socket
+            let mut buf = [0; 8];
+            let amt = rx_sock.recv(&mut buf).unwrap();
+            if amt == 8 {
+                let num = u64::from_be_bytes(buf);
+                println!("rx: Received {num} from socket, sending to client");
+                to_client.send(PingReqResp{ index: num, timestamp: Instant::now(), t: ReqResp::RESPONSE }).unwrap();
             }
-            Err(err) => {
-                println!("tx: Got error during recv from client: {err}");
+            else {
+                println!("rx: Received not full number. {amt} instead of 8.");
                 break;
             }
         }
-    }
-}
-
-fn rx_transport_thread(to_client: Sender<PingReqResp>) {
-    let socket = UdpSocket::bind("127.0.0.1:44444").unwrap();
-
-    loop {
-        let mut buf = [0; 8];
-        let amt = socket.recv(&mut buf).unwrap();
-        if amt == 8 {
-            let num = u64::from_be_bytes(buf);
-            println!("rx: Received {num} from socket, sending to client");
-            to_client.send(PingReqResp{ index: num, timestamp: Instant::now(), t: ReqResp::RESPONSE }).unwrap();
-        }
         else {
-            println!("rx: Received not full number. {amt} instead of 8.");
             break;
         }
     }
@@ -93,37 +86,34 @@ fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>
     let mut requests: VecDeque<PingReqResp> = VecDeque::new();
 
     loop {
-        match from_transport.recv() {
-            Ok(resp) => {
-                match resp.t {
-                    ReqResp::REQUEST => {
-                        requests.push_back(resp);
-                    },
-                    ReqResp::RESPONSE => {
-                        let index = resp.index;
-                        println!("client: Received {index} from transport");
+        if let Ok(resp) = from_transport.recv() {
+            match resp.t {
+                ReqResp::REQUEST => {
+                    requests.push_back(resp);
+                },
+                ReqResp::RESPONSE => {
+                    let index = resp.index;
+                    println!("client: Received {index} from transport");
 
-                        while let Some(req) = requests.pop_front() {
-                            match index.cmp(&req.index) {
-                                Ordering::Greater => continue,
-                                Ordering::Equal => {
-                                    let timestamp = PingRTT {
-                                        index,
-                                        rtt: resp.timestamp.duration_since(req.timestamp)
-                                    };
-                                    to_presenter.send(timestamp).unwrap();
-                                }
-                                Ordering::Less => requests.push_front(req),
+                    while let Some(req) = requests.pop_front() {
+                        match index.cmp(&req.index) {
+                            Ordering::Greater => continue,
+                            Ordering::Equal => {
+                                let timestamp = PingRTT {
+                                    index,
+                                    rtt: resp.timestamp.duration_since(req.timestamp)
+                                };
+                                to_presenter.send(timestamp).unwrap();
                             }
-                            break;
+                            Ordering::Less => requests.push_front(req),
                         }
-                    },
-                }
+                        break;
+                    }
+                },
             }
-            Err(err) => {
-                println!("client: Error during recv from transport: {err}");
-                break;
-            }
+        }
+        else {
+            break;
         }
         println!();
     }
@@ -131,12 +121,11 @@ fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>
 
 fn presenter(from_statista: Receiver<PingRTT>) {
     loop {
-        match from_statista.recv() {
-            Ok(PingRTT { index, rtt }) => println!("Seq: {index} rtt: {:#?}", rtt),
-            Err(err) => {
-                println!("presenter: Error during recv from statista: {err}");
-                break;
-            }
+        if let Ok(rtt) = from_statista.recv() {
+            println!("Seq: {} rtt: {:#?}", rtt.index, rtt.rtt);
+        }
+        else {
+            break;
         }
     }
 }
@@ -144,18 +133,15 @@ fn presenter(from_statista: Receiver<PingRTT>) {
 fn main() {
     let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
     let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
-    let rxtr_cl_tx = txtr_cl_tx.clone();
     let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel();
 
     let generator = thread::spawn(move || generator(cl_txtr_tx));
-    let tx_transport = thread::spawn(move || tx_transport_thread(cl_txtr_rx, txtr_cl_tx));
-    let rx_transport = thread::spawn(move || rx_transport_thread(rxtr_cl_tx));
+    let tx_transport = thread::spawn(move || transport(cl_txtr_rx, txtr_cl_tx));
     let statista = thread::spawn(move || statista(tr_cl_rx, st_pr_tx));
     let presenter = thread::spawn(move || presenter(st_pr_rx));
 
     generator.join().expect("oops, generator crashed");
     tx_transport.join().expect("oops, tx transport crashed");
-    rx_transport.join().expect("oops, rx transport crashed");
     statista.join().expect("oops, statista crashed");
     presenter.join().expect("oops, presenter crashed");
 }

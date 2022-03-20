@@ -37,7 +37,7 @@ struct PingRTT {
 }
 
 
-fn transport(from_client: Receiver<PingReqResp>,
+fn transport_thread(from_client: Receiver<PingReqResp>,
              to_client: Sender<PingReqResp>) {
     let tx_sock = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
     let rx_sock = UdpSocket::bind("127.0.0.1:44444").unwrap();
@@ -76,7 +76,7 @@ fn transport(from_client: Receiver<PingReqResp>,
     }
 }
 
-fn generator(to_tx_transport: Sender<PingReqResp>) {
+fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
     for i in 0..20 {
         let req = PingReqResp{
             index: i,
@@ -92,7 +92,7 @@ fn generator(to_tx_transport: Sender<PingReqResp>) {
     }
 }
 
-fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>) {
+fn statista_thread(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>) {
     let mut requests: VecDeque<PingReqResp> = VecDeque::new();
 
     loop {
@@ -127,7 +127,7 @@ fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>
     }
 }
 
-fn presenter(from_statista: Receiver<PingRTT>) {
+fn presenter_thread(from_statista: Receiver<PingRTT>) {
     loop {
         if let Ok(rtt) = from_statista.recv() {
             println!("Seq: {} rtt: {:#?}", rtt.index, rtt.rtt);
@@ -143,13 +143,13 @@ fn main() {
     let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
     let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel();
 
-    let generator = thread::spawn(move || generator(cl_txtr_tx));
-    let tx_transport = thread::spawn(move || transport(cl_txtr_rx, txtr_cl_tx));
-    let statista = thread::spawn(move || statista(tr_cl_rx, st_pr_tx));
-    let presenter = thread::spawn(move || presenter(st_pr_rx));
+    let generator = thread::spawn(move || generator_thread(cl_txtr_tx));
+    let transport = thread::spawn(move || transport_thread(cl_txtr_rx, txtr_cl_tx));
+    let statista = thread::spawn(move || statista_thread(tr_cl_rx, st_pr_tx));
+    let presenter = thread::spawn(move || presenter_thread(st_pr_rx));
 
     generator.join().expect("oops, generator crashed");
-    tx_transport.join().expect("oops, tx transport crashed");
+    transport.join().expect("oops, tx transport crashed");
     statista.join().expect("oops, statista crashed");
     presenter.join().expect("oops, presenter crashed");
 }

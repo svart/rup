@@ -31,7 +31,13 @@ struct PingReqResp {
     t: ReqResp,
 }
 
+struct PingRTT {
+    index: u64,
+    rtt: Duration,
+}
 
+
+// TODO: merge 2 transport threads together
 fn tx_transport_thread(from_client: Receiver<PingReqResp>,
                        to_client: Sender<PingReqResp>) {
     let socket = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
@@ -72,7 +78,7 @@ fn rx_transport_thread(to_client: Sender<PingReqResp>) {
     }
 }
 
-fn client_generator(to_tx_transport: Sender<PingReqResp>) {
+fn generator(to_tx_transport: Sender<PingReqResp>) {
     for i in 0..20 {
         match to_tx_transport.send(PingReqResp{index: i, timestamp: Instant::now(), t: ReqResp::REQUEST}) {
             Ok(_) => println!("client: Sent {i} to transport"),
@@ -83,7 +89,7 @@ fn client_generator(to_tx_transport: Sender<PingReqResp>) {
     }
 }
 
-fn client_statistic(from_transport: Receiver<PingReqResp>) {
+fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>) {
     let mut requests: VecDeque<PingReqResp> = VecDeque::new();
 
     loop {
@@ -100,7 +106,13 @@ fn client_statistic(from_transport: Receiver<PingReqResp>) {
                         while let Some(req) = requests.pop_front() {
                             match index.cmp(&req.index) {
                                 Ordering::Greater => continue,
-                                Ordering::Equal => println!("Seq: {index} rtt: {:#?}", resp.timestamp.duration_since(req.timestamp)),
+                                Ordering::Equal => {
+                                    let timestamp = PingRTT {
+                                        index,
+                                        rtt: resp.timestamp.duration_since(req.timestamp)
+                                    };
+                                    to_presenter.send(timestamp).unwrap();
+                                }
                                 Ordering::Less => requests.push_front(req),
                             }
                             break;
@@ -117,19 +129,33 @@ fn client_statistic(from_transport: Receiver<PingReqResp>) {
     }
 }
 
+fn presenter(from_statista: Receiver<PingRTT>) {
+    loop {
+        match from_statista.recv() {
+            Ok(PingRTT { index, rtt }) => println!("Seq: {index} rtt: {:#?}", rtt),
+            Err(err) => {
+                println!("presenter: Error during recv from statista: {err}");
+                break;
+            }
+        }
+    }
+}
+
 fn main() {
     let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
     let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
     let rxtr_cl_tx = txtr_cl_tx.clone();
+    let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel();
 
-
-    let generator = thread::spawn(move || client_generator(cl_txtr_tx));
+    let generator = thread::spawn(move || generator(cl_txtr_tx));
     let tx_transport = thread::spawn(move || tx_transport_thread(cl_txtr_rx, txtr_cl_tx));
     let rx_transport = thread::spawn(move || rx_transport_thread(rxtr_cl_tx));
-    let statista = thread::spawn(move || client_statistic(tr_cl_rx));
+    let statista = thread::spawn(move || statista(tr_cl_rx, st_pr_tx));
+    let presenter = thread::spawn(move || presenter(st_pr_rx));
 
     generator.join().expect("oops, generator crashed");
     tx_transport.join().expect("oops, tx transport crashed");
     rx_transport.join().expect("oops, rx transport crashed");
-    statista.join().expect("oops, statista crashed")
+    statista.join().expect("oops, statista crashed");
+    presenter.join().expect("oops, presenter crashed");
 }

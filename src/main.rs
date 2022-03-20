@@ -48,21 +48,26 @@ fn transport(from_client: Receiver<PingReqResp>,
             // Sending request to socket
             let index = req.index;
             req.timestamp = Instant::now();
-            println!("tx: Received {index} from client");
+
             tx_sock.send(&index.to_be_bytes()).expect("tx: couldn't send message");
+
             to_client.send(req).expect("tx: couldn't send transformed request to client");
 
             // Receiving request from socket
             let mut buf = [0; 8];
             let amt = rx_sock.recv(&mut buf).unwrap();
+
             if amt == 8 {
-                let num = u64::from_be_bytes(buf);
-                println!("rx: Received {num} from socket, sending to client");
-                to_client.send(PingReqResp{ index: num, timestamp: Instant::now(), t: ReqResp::RESPONSE }).unwrap();
+                let req = PingReqResp {
+                    index: u64::from_be_bytes(buf),
+                    timestamp: Instant::now(),
+                    t: ReqResp::RESPONSE
+                };
+
+                to_client.send(req).unwrap();
             }
             else {
-                println!("rx: Received not full number. {amt} instead of 8.");
-                break;
+                panic!("rx: Received not full number. {amt} instead of 8.");
             }
         }
         else {
@@ -73,9 +78,14 @@ fn transport(from_client: Receiver<PingReqResp>,
 
 fn generator(to_tx_transport: Sender<PingReqResp>) {
     for i in 0..20 {
-        match to_tx_transport.send(PingReqResp{index: i, timestamp: Instant::now(), t: ReqResp::REQUEST}) {
-            Ok(_) => println!("client: Sent {i} to transport"),
-            Err(err) => panic!("client: Error during sending {i} to transport: {err}"),
+        let req = PingReqResp{
+            index: i,
+            timestamp: Instant::now(),
+            t: ReqResp::REQUEST
+        };
+
+        if let Err(err) = to_tx_transport.send(req) {
+            panic!("client: Error during sending {i} to transport: {err}");
         }
 
         thread::sleep(Duration::from_millis(500));
@@ -93,7 +103,6 @@ fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>
                 },
                 ReqResp::RESPONSE => {
                     let index = resp.index;
-                    println!("client: Received {index} from transport");
 
                     while let Some(req) = requests.pop_front() {
                         match index.cmp(&req.index) {
@@ -115,7 +124,6 @@ fn statista(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>
         else {
             break;
         }
-        println!();
     }
 }
 

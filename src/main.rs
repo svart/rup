@@ -38,7 +38,7 @@ struct PingRTT {
 
 
 fn transport_thread(from_client: Receiver<PingReqResp>,
-             to_client: Sender<PingReqResp>) {
+                    to_client: Sender<PingReqResp>) {
     let tx_sock = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
     let rx_sock = UdpSocket::bind("127.0.0.1:44444").unwrap();
     tx_sock.connect("127.0.0.1:44444").expect("tx: connect function failed");
@@ -92,7 +92,8 @@ fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
     }
 }
 
-fn statista_thread(from_transport: Receiver<PingReqResp>, to_presenter: Sender<PingRTT>) {
+fn statista_thread(from_transport: Receiver<PingReqResp>,
+                   to_presenter: Sender<PingRTT>) {
     let mut requests: VecDeque<PingReqResp> = VecDeque::new();
 
     loop {

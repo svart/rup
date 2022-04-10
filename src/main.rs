@@ -1,30 +1,19 @@
-// mod tcp;
-// mod udp;
-// mod client;
-// mod server;
-// mod pinger;
-// mod common;
-// mod icmp;
-
-// #[macro_use]
-// extern crate clap;
-
-// use clap::App;
-// use std::io::Result;
-
-use std::sync::mpsc::{Sender, Receiver};
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
-use std::net::UdpSocket;
 use std::collections::VecDeque;
 use std::cmp::Ordering;
+use std::io;
 
+use tokio::{self, time};
+use tokio::sync::mpsc::{self, Sender, Receiver};
+use tokio::net::UdpSocket;
+
+#[derive(Debug)]
 enum ReqResp {
     REQUEST,
     RESPONSE,
 }
 
+#[derive(Debug)]
 struct PingReqResp {
     index: u64,
     timestamp: Instant,
@@ -37,25 +26,25 @@ struct PingRTT {
 }
 
 
-fn transport_thread(from_client: Receiver<PingReqResp>,
-                    to_client: Sender<PingReqResp>) {
-    let tx_sock = UdpSocket::bind("127.0.0.1:55555").expect("tx: binding failed");
-    let rx_sock = UdpSocket::bind("127.0.0.1:44444").unwrap();
-    tx_sock.connect("127.0.0.1:44444").expect("tx: connect function failed");
+async fn transport_thread(mut from_client: Receiver<PingReqResp>,
+                          to_client: Sender<PingReqResp>) {
+    let tx_sock = UdpSocket::bind("127.0.0.1:55555").await.expect("tx: binding failed");
+    let rx_sock = UdpSocket::bind("127.0.0.1:44444").await.unwrap();
+    tx_sock.connect("127.0.0.1:44444").await.expect("tx: connect function failed");
 
     loop {
-        if let Ok(mut req) = from_client.recv() {
+        if let Some(mut req) = from_client.recv().await {
             // Sending request to socket
             let index = req.index;
             req.timestamp = Instant::now();
 
-            tx_sock.send(&index.to_be_bytes()).expect("tx: couldn't send message");
+            tx_sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
 
-            to_client.send(req).expect("tx: couldn't send transformed request to client");
+            to_client.send(req).await.expect("tx: couldn't send transformed request to client");
 
             // Receiving request from socket
             let mut buf = [0; 8];
-            let amt = rx_sock.recv(&mut buf).unwrap();
+            let amt = rx_sock.recv(&mut buf).await.unwrap();
 
             if amt == 8 {
                 let req = PingReqResp {
@@ -64,7 +53,7 @@ fn transport_thread(from_client: Receiver<PingReqResp>,
                     t: ReqResp::RESPONSE
                 };
 
-                to_client.send(req).unwrap();
+                to_client.send(req).await.unwrap();
             }
             else {
                 panic!("rx: Received not full number. {amt} instead of 8.");
@@ -76,7 +65,7 @@ fn transport_thread(from_client: Receiver<PingReqResp>,
     }
 }
 
-fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
+async fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
     for i in 0..20 {
         let req = PingReqResp{
             index: i,
@@ -84,20 +73,20 @@ fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
             t: ReqResp::REQUEST
         };
 
-        if let Err(err) = to_tx_transport.send(req) {
+        if let Err(err) = to_tx_transport.send(req).await {
             panic!("client: Error during sending {i} to transport: {err}");
         }
 
-        thread::sleep(Duration::from_millis(500));
+        time::sleep(Duration::from_millis(500)).await;
     }
 }
 
-fn statista_thread(from_transport: Receiver<PingReqResp>,
-                   to_presenter: Sender<PingRTT>) {
+async fn statista_thread(mut from_transport: Receiver<PingReqResp>,
+                         to_presenter: Sender<PingRTT>) {
     let mut requests: VecDeque<PingReqResp> = VecDeque::new();
 
     loop {
-        if let Ok(resp) = from_transport.recv() {
+        if let Some(resp) = from_transport.recv().await {
             match resp.t {
                 ReqResp::REQUEST => {
                     requests.push_back(resp);
@@ -113,7 +102,7 @@ fn statista_thread(from_transport: Receiver<PingReqResp>,
                                     index,
                                     rtt: resp.timestamp.duration_since(req.timestamp)
                                 };
-                                to_presenter.send(timestamp).unwrap();
+                                to_presenter.send(timestamp).await;
                             }
                             Ordering::Less => requests.push_front(req),
                         }
@@ -128,9 +117,9 @@ fn statista_thread(from_transport: Receiver<PingReqResp>,
     }
 }
 
-fn presenter_thread(from_statista: Receiver<PingRTT>) {
+async fn presenter_thread(mut from_statista: Receiver<PingRTT>) {
     loop {
-        if let Ok(rtt) = from_statista.recv() {
+        if let Some(rtt) = from_statista.recv().await {
             println!("Seq: {} rtt: {:#?}", rtt.index, rtt.rtt);
         }
         else {
@@ -139,18 +128,20 @@ fn presenter_thread(from_statista: Receiver<PingRTT>) {
     }
 }
 
-fn main() {
-    let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
-    let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel();
-    let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel();
 
-    let generator = thread::spawn(move || generator_thread(cl_txtr_tx));
-    let transport = thread::spawn(move || transport_thread(cl_txtr_rx, txtr_cl_tx));
-    let statista = thread::spawn(move || statista_thread(tr_cl_rx, st_pr_tx));
-    let presenter = thread::spawn(move || presenter_thread(st_pr_rx));
+#[tokio::main]
+async fn main() -> Result<(), io::Error> {
+    let channel_cap: usize = 32;
 
-    generator.join().expect("oops, generator crashed");
-    transport.join().expect("oops, tx transport crashed");
-    statista.join().expect("oops, statista crashed");
-    presenter.join().expect("oops, presenter crashed");
+    let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+    let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+    let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
+
+    let generator = tokio::spawn(generator_thread(cl_txtr_tx));
+    let transport = tokio::spawn(transport_thread(cl_txtr_rx, txtr_cl_tx));
+    let statista = tokio::spawn(statista_thread(tr_cl_rx, st_pr_tx));
+    let presenter = tokio::spawn(presenter_thread(st_pr_rx));
+
+    tokio::join!(generator, transport, statista, presenter);
+    Ok(())
 }

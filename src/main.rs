@@ -33,34 +33,38 @@ async fn transport_thread(mut from_client: Receiver<PingReqResp>,
     tx_sock.connect("127.0.0.1:44444").await.expect("tx: connect function failed");
 
     loop {
-        if let Some(mut req) = from_client.recv().await {
-            // Sending request to socket
-            let index = req.index;
-            req.timestamp = Instant::now();
+        let mut buf = [0; 8];
 
-            tx_sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
+        tokio::select! {
+            r_val = from_client.recv() => {
+                match r_val {
+                    Some(mut req) => {
+                        // Sending request to socket
+                        let index = req.index;
+                        req.timestamp = Instant::now();
 
-            to_client.send(req).await.expect("tx: couldn't send transformed request to client");
+                        tx_sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
 
-            // Receiving request from socket
-            let mut buf = [0; 8];
-            let amt = rx_sock.recv(&mut buf).await.unwrap();
-
-            if amt == 8 {
-                let req = PingReqResp {
-                    index: u64::from_be_bytes(buf),
-                    timestamp: Instant::now(),
-                    t: ReqResp::RESPONSE
-                };
-
-                to_client.send(req).await.unwrap();
+                        to_client.send(req).await.expect("tx: couldn't send transformed request to client");
+                    }
+                    None => break,
+                }
             }
-            else {
-                panic!("rx: Received not full number. {amt} instead of 8.");
+            r_val = rx_sock.recv(&mut buf) => {
+                let amt = r_val.unwrap();
+                if amt == 8 {
+                    let req = PingReqResp {
+                        index: u64::from_be_bytes(buf),
+                        timestamp: Instant::now(),
+                        t: ReqResp::RESPONSE
+                    };
+
+                    to_client.send(req).await.unwrap();
+                }
+                else {
+                    panic!("rx: Received not full number. {amt} instead of 8.");
+                }
             }
-        }
-        else {
-            break;
         }
     }
 }

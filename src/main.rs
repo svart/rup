@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::cmp::Ordering;
 use std::io;
 
+use clap::builder::TypedValueParser;
 use tokio::{self, time};
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::net::UdpSocket;
@@ -180,6 +182,21 @@ fn cli() -> Command {
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let matches = cli().get_matches();
+
+    let interval = matches.get_one::<u32>("interval");
+    let protocol = matches.get_one::<String>("protocol");
+    let local_address = matches.get_one::<SocketAddr>("local-address");
+
+    match matches.subcommand() {
+        Some(("client", submatch)) => {
+            let remote_address = submatch.get_one::<SocketAddr>("remote-address");
+        },
+        Some(("server", _)) => {
+
+        }
+        _ => unreachable!()
+    }
+
     let channel_cap: usize = 32;
 
     let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);

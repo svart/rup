@@ -7,8 +7,10 @@ use tokio::{self, time};
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::net::UdpSocket;
 
+use clap::{Command, Arg, ArgAction};
+
 #[derive(Debug)]
-enum ReqResp {
+enum MsgType {
     REQUEST,
     RESPONSE,
 }
@@ -17,7 +19,7 @@ enum ReqResp {
 struct PingReqResp {
     index: u64,
     timestamp: Instant,
-    t: ReqResp,
+    t: MsgType,
 }
 
 struct PingRTT {
@@ -56,7 +58,7 @@ async fn transport_thread(mut from_client: Receiver<PingReqResp>,
                     let req = PingReqResp {
                         index: u64::from_be_bytes(buf),
                         timestamp: Instant::now(),
-                        t: ReqResp::RESPONSE
+                        t: MsgType::RESPONSE
                     };
 
                     to_client.send(req).await.unwrap();
@@ -71,10 +73,10 @@ async fn transport_thread(mut from_client: Receiver<PingReqResp>,
 
 async fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
     for i in 0..20 {
-        let req = PingReqResp{
+        let req = PingReqResp {
             index: i,
             timestamp: Instant::now(),
-            t: ReqResp::REQUEST
+            t: MsgType::REQUEST
         };
 
         if let Err(err) = to_tx_transport.send(req).await {
@@ -92,10 +94,10 @@ async fn statista_thread(mut from_transport: Receiver<PingReqResp>,
     loop {
         if let Some(resp) = from_transport.recv().await {
             match resp.t {
-                ReqResp::REQUEST => {
+                MsgType::REQUEST => {
                     requests.push_back(resp);
                 },
-                ReqResp::RESPONSE => {
+                MsgType::RESPONSE => {
                     let index = resp.index;
 
                     while let Some(req) = requests.pop_front() {
@@ -132,9 +134,52 @@ async fn presenter_thread(mut from_statista: Receiver<PingRTT>) {
     }
 }
 
+fn cli() -> Command {
+    Command::new("rup")
+        .about("rup universal pinger")
+        .subcommand(
+            Command::new("client")
+                .about("Send requests to the remote side and measure RTT")
+                .arg(
+                    Arg::new("remote-address")
+                        .help("Were to send echo requests")
+                        .action(ArgAction::Set)
+                        .required(true)
+                )
+        )
+        .subcommand(
+            Command::new("server")
+                .about("Receive requests and send them back immediately")
+        )
+        .arg(
+            Arg::new("local-address")
+                .long("local-address")
+                .help("Set local address to bind to")
+                .action(ArgAction::Set)
+        )
+        .arg(
+            Arg::new("protocol")
+                .long("protocol")
+                .short('p')
+                .help("Set protocol to use for ping")
+                .action(ArgAction::Set)
+                .value_parser(["tcp", "udp", "icmp"])
+                .default_value("udp")
+        )
+        .arg(
+            Arg::new("interval")
+                .long("interval")
+                .short('i')
+                .help("Set interval in ms to send echo requests")
+                .action(ArgAction::Set)
+                .value_parser(clap::value_parser!(u32).range(1..))
+                .default_value("1000")
+        )
+}
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
+    let matches = cli().get_matches();
     let channel_cap: usize = 32;
 
     let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);

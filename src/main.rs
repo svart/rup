@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::cmp::Ordering;
 use std::io;
 
@@ -29,11 +29,37 @@ struct PingRTT {
 }
 
 
-async fn transport_thread(mut from_client: Receiver<PingReqResp>,
-                          to_client: Sender<PingReqResp>) {
-    let tx_sock = UdpSocket::bind("127.0.0.1:55555").await.expect("tx: binding failed");
-    let rx_sock = UdpSocket::bind("127.0.0.1:44444").await.unwrap();
-    tx_sock.connect("127.0.0.1:44444").await.expect("tx: connect function failed");
+async fn server_transport(local_address: SocketAddr) {
+    let sock = UdpSocket::bind(local_address).await.expect("server: binding failed");
+
+    let mut client_addrs: HashSet<SocketAddr> = HashSet::new();
+
+    loop {
+        let mut buf = [0; 8];
+
+        let (amt, addr) = sock.recv_from(&mut buf).await.unwrap();
+
+        if !client_addrs.contains(&addr) {
+            println!("New connection from {addr}");
+            client_addrs.insert(addr);
+        }
+
+        if amt == 8 {
+            sock.send_to(&buf, addr).await.unwrap();
+        }
+        else {
+            panic!("server: Received not full number. {amt} instead of 8.")
+        }
+    }
+}
+
+
+async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
+                          to_client: Sender<PingReqResp>,
+                          local_address: SocketAddr,
+                          remote_address: SocketAddr) {
+    let sock = UdpSocket::bind(local_address).await.expect("pinger: binding failed");
+    sock.connect(remote_address).await.expect("pinger: connect function failed");
 
     loop {
         let mut buf = [0; 8];
@@ -46,14 +72,14 @@ async fn transport_thread(mut from_client: Receiver<PingReqResp>,
                         let index = req.index;
                         req.timestamp = Instant::now();
 
-                        tx_sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
+                        sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
 
                         to_client.send(req).await.expect("tx: couldn't send transformed request to client");
                     }
                     None => break,
                 }
             }
-            r_val = rx_sock.recv(&mut buf) => {
+            r_val = sock.recv(&mut buf) => {
                 let amt = r_val.unwrap();
                 if amt == 8 {
                     let req = PingReqResp {
@@ -148,17 +174,36 @@ fn cli() -> Command {
                         .help("Were to send echo requests")
                         .action(ArgAction::Set)
                         .required(true)
+                        .value_parser(clap::value_parser!(SocketAddr))
+                )
+                .arg(
+                    Arg::new("local-address")
+                        .long("local-address")
+                        .help("Set local address to bind to")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(SocketAddr))
+                        .default_value("0.0.0.0:0")
+                )
+                .arg(
+                    Arg::new("interval")
+                        .long("interval")
+                        .short('i')
+                        .help("Set interval in ms to send echo requests")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u64).range(1..))
+                        .default_value("1000")
                 )
         )
         .subcommand(
             Command::new("server")
                 .about("Receive requests and send them back immediately")
-        )
-        .arg(
-            Arg::new("local-address")
-                .long("local-address")
-                .help("Set local address to bind to")
-                .action(ArgAction::Set)
+                .arg(
+                    Arg::new("local-address")
+                        .help("Which address to listen to")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .value_parser(clap::value_parser!(SocketAddr))
+                )
         )
         .arg(
             Arg::new("protocol")
@@ -169,46 +214,42 @@ fn cli() -> Command {
                 .value_parser(["tcp", "udp", "icmp"])
                 .default_value("udp")
         )
-        .arg(
-            Arg::new("interval")
-                .long("interval")
-                .short('i')
-                .help("Set interval in ms to send echo requests")
-                .action(ArgAction::Set)
-                .value_parser(clap::value_parser!(u32).range(1..))
-                .default_value("1000")
-        )
 }
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let matches = cli().get_matches();
 
-    let interval = matches.get_one::<u64>("interval").unwrap();
-    let protocol = matches.get_one::<String>("protocol");
-    let local_address = matches.get_one::<SocketAddr>("local-address");
+    let channel_cap: usize = 32;
+
+    // let protocol = matches.get_one::<String>("protocol").unwrap();
 
     match matches.subcommand() {
         Some(("client", submatch)) => {
-            let remote_address = submatch.get_one::<SocketAddr>("remote-address");
-        },
-        Some(("server", _)) => {
+            let remote_address = submatch.get_one::<SocketAddr>("remote-address").unwrap();
+            let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
+            let interval = submatch.get_one::<u64>("interval").unwrap();
 
-        }
+            let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+            let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+            let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
+
+            let generator = tokio::spawn(generator_thread(cl_txtr_tx, *interval));
+            let transport = tokio::spawn(pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address));
+            let statista = tokio::spawn(statista_thread(tr_cl_rx, st_pr_tx));
+            let presenter = tokio::spawn(presenter_thread(st_pr_rx));
+
+            let _ = tokio::join!(generator, transport, statista, presenter);
+        },
+        Some(("server", submatch)) => {
+            let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
+
+            let server = tokio::spawn(server_transport(*local_address));
+
+            let _ = tokio::join!(server);
+        },
         _ => unreachable!()
     }
 
-    let channel_cap: usize = 32;
-
-    let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-    let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-    let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
-
-    let generator = tokio::spawn(generator_thread(cl_txtr_tx, *interval));
-    let transport = tokio::spawn(transport_thread(cl_txtr_rx, txtr_cl_tx));
-    let statista = tokio::spawn(statista_thread(tr_cl_rx, st_pr_tx));
-    let presenter = tokio::spawn(presenter_thread(st_pr_rx));
-
-    tokio::join!(generator, transport, statista, presenter);
     Ok(())
 }

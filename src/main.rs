@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::cmp::Ordering;
 use std::io;
 
-use clap::builder::TypedValueParser;
 use tokio::{self, time};
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::net::UdpSocket;
@@ -73,8 +72,9 @@ async fn transport_thread(mut from_client: Receiver<PingReqResp>,
     }
 }
 
-async fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
-    for i in 0..20 {
+async fn generator_thread(to_tx_transport: Sender<PingReqResp>, interval: u64) {
+    let mut i: u64 = 0;
+    loop {
         let req = PingReqResp {
             index: i,
             timestamp: Instant::now(),
@@ -85,7 +85,8 @@ async fn generator_thread(to_tx_transport: Sender<PingReqResp>) {
             panic!("client: Error during sending {i} to transport: {err}");
         }
 
-        time::sleep(Duration::from_millis(500)).await;
+        time::sleep(Duration::from_millis(interval)).await;
+        i += 1;
     }
 }
 
@@ -183,7 +184,7 @@ fn cli() -> Command {
 async fn main() -> Result<(), io::Error> {
     let matches = cli().get_matches();
 
-    let interval = matches.get_one::<u32>("interval");
+    let interval = matches.get_one::<u64>("interval").unwrap();
     let protocol = matches.get_one::<String>("protocol");
     let local_address = matches.get_one::<SocketAddr>("local-address");
 
@@ -203,7 +204,7 @@ async fn main() -> Result<(), io::Error> {
     let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
     let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
 
-    let generator = tokio::spawn(generator_thread(cl_txtr_tx));
+    let generator = tokio::spawn(generator_thread(cl_txtr_tx, *interval));
     let transport = tokio::spawn(transport_thread(cl_txtr_rx, txtr_cl_tx));
     let statista = tokio::spawn(statista_thread(tr_cl_rx, st_pr_tx));
     let presenter = tokio::spawn(presenter_thread(st_pr_rx));

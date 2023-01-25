@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, Sender, Receiver};
 use clap::{Command, Arg, ArgAction};
 
 mod async_udp;
+mod async_tcp;
 mod pinger;
 mod statistics;
 
@@ -73,7 +74,7 @@ async fn main() -> Result<(), io::Error> {
 
     let channel_cap: usize = 32;
 
-    // let protocol = matches.get_one::<String>("protocol").unwrap();
+    let protocol = matches.get_one::<String>("protocol").unwrap();
 
     match matches.subcommand() {
         Some(("client", submatch)) => {
@@ -85,17 +86,28 @@ async fn main() -> Result<(), io::Error> {
             let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
             let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
 
-            let transport = tokio::spawn(async_udp::pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address));
+            let pinger = match protocol.as_str() {
+                "tcp" => tokio::spawn(async_tcp::pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address)),
+                "udp" => tokio::spawn(async_udp::pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address)),
+                "icmp" => unimplemented!(),
+                _ => unreachable!(),
+            };
+
             let generator = tokio::spawn(pinger::generator(cl_txtr_tx, *interval));
             let statista = tokio::spawn(statistics::statista(tr_cl_rx, st_pr_tx));
             let presenter = tokio::spawn(statistics::presenter(st_pr_rx));
 
-            let _ = tokio::join!(generator, transport, statista, presenter);
+            let _ = tokio::join!(pinger, generator, statista, presenter);
         },
         Some(("server", submatch)) => {
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
 
-            let server = tokio::spawn(async_udp::server_transport(*local_address));
+            let server = match protocol.as_str() {
+                "tcp" => tokio::spawn(async_tcp::server_transport(*local_address)),
+                "udp" => tokio::spawn(async_udp::server_transport(*local_address)),
+                "icmp" => panic!("there is no server for icmp"),
+                _ => unreachable!(),
+            };
 
             let _ = tokio::join!(server);
         },

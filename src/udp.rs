@@ -54,34 +54,6 @@ impl Pinger for Client<UdpSocket> {
     }
 }
 
-pub fn run_server(local_address: &str, local_port: &str) -> Result<()> {
-    println!("Running UDP server listening {}:{}", local_address, local_port);
-
-    let mut socket = UdpSocket::bind(format!("{}:{}", local_address, local_port).parse().unwrap())?;
-
-    let mut poll = setup_server_polling(&mut socket)?;
-    let mut events = Events::with_capacity(128);
-
-    loop {
-        poll.poll(&mut events, None)?;
-        for event in events.iter() {
-            if event.is_readable() {
-                loop {
-                    let mut buf = [0; PING_MSG_LEN];
-                    match socket.recv_from(&mut buf) {
-                        Ok((amt, src)) => {
-                            socket.send_to(&buf[..amt], src)?;
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub fn run_client(address: &str, port: &str, interval: Option<u64>) -> Result<()> {
     println!("Running UDP client sending pings to {}:{}", address, port);
     let mut client = <Client<UdpSocket>>::new(address, port, interval)?;

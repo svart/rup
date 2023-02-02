@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::io;
+use std::time::Duration;
 
 use tokio;
 use tokio::sync::mpsc::{self, Sender, Receiver};
@@ -45,6 +46,15 @@ fn cli() -> Command {
                         .value_parser(clap::value_parser!(u64).range(1..))
                         .default_value("1000")
                 )
+                .arg(
+                    Arg::new("wait-time")
+                        .long("wait-time")
+                        .short('W')
+                        .help("Time to wait for responce im ms")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u64).range(1..))
+                        .default_value("1000")
+                )
         )
         .subcommand(
             Command::new("server")
@@ -81,6 +91,7 @@ async fn main() -> Result<(), io::Error> {
             let remote_address = submatch.get_one::<SocketAddr>("remote-address").unwrap();
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
             let interval = submatch.get_one::<u64>("interval").unwrap();
+            let wait_time = submatch.get_one::<u64>("wait-time").unwrap();
 
             let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
             let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
@@ -94,7 +105,7 @@ async fn main() -> Result<(), io::Error> {
             };
 
             let generator = tokio::spawn(pinger::generator(cl_txtr_tx, *interval));
-            let statista = tokio::spawn(statistics::statista(tr_cl_rx, st_pr_tx));
+            let statista = tokio::spawn(statistics::statista(tr_cl_rx, st_pr_tx, Duration::from_millis(*wait_time)));
             let presenter = tokio::spawn(statistics::presenter(st_pr_rx));
 
             let _ = tokio::join!(pinger, generator, statista, presenter);

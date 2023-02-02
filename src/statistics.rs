@@ -3,13 +3,13 @@ use std::{collections::VecDeque, cmp::Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::sleep;
 
 use crate::pinger::{PingReqResp, MsgType};
 
 #[derive(Debug)]
-pub(crate) struct PingRTT {
+struct PingRTT {
     index: u64,
     rtt: Duration,
 }
@@ -38,10 +38,12 @@ async fn receive_timeout(index: u64,
 }
 
 pub(crate) async fn statista(mut from_transport: Receiver<PingReqResp>,
-                             to_presenter: Sender<PingRTT>,
                              to_generator: Option<Sender<u8>>,
                              wait_time: Duration) {
     let req_lock: Arc<Mutex<VecDeque<PingReqResp>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
+
+    tokio::spawn(presenter(stat_pres_recv));
 
     loop {
         if let Some(resp) =  from_transport.recv().await {
@@ -74,7 +76,7 @@ pub(crate) async fn statista(mut from_transport: Receiver<PingReqResp>,
                                     gen_channel.send(0).await.unwrap();
                                 }
 
-                                to_presenter.send(timestamp).await.unwrap();
+                                stat_pres_send.send(timestamp).await.unwrap();
                             }
                             Ordering::Less => requests.push_front(req),
                         }
@@ -89,7 +91,7 @@ pub(crate) async fn statista(mut from_transport: Receiver<PingReqResp>,
     }
 }
 
-pub(crate) async fn presenter(mut from_statista: Receiver<PingRTT>) {
+async fn presenter(mut from_statista: Receiver<PingRTT>) {
     while let Some(rtt) = from_statista.recv().await {
         println!("seq: {} rtt: {:#?}", rtt.index, rtt.rtt);
     }

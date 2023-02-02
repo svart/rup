@@ -12,7 +12,6 @@ mod pinger;
 mod statistics;
 
 use pinger::{PingReqResp, SendMode};
-use statistics::PingRTT;
 
 
 fn cli() -> Command {
@@ -104,7 +103,6 @@ async fn main() -> Result<(), io::Error> {
 
             let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
             let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-            let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
 
             let (send_mode, txtr_gen) = if *adaptive {
                 let (txtr_gen_send, txtr_gen_recv): (Sender<u8>, Receiver<u8>) = mpsc::channel(channel_cap);
@@ -123,10 +121,9 @@ async fn main() -> Result<(), io::Error> {
             };
 
             let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode));
-            let statista = tokio::spawn(statistics::statista(txtr_stat_recv, stat_pres_send, txtr_gen, Duration::from_millis(*wait_time)));
-            let presenter = tokio::spawn(statistics::presenter(stat_pres_recv));
+            let statista = tokio::spawn(statistics::statista(txtr_stat_recv, txtr_gen, Duration::from_millis(*wait_time)));
 
-            let _ = tokio::join!(pinger, generator, statista, presenter);
+            let _ = tokio::join!(pinger, generator, statista);
         },
         Some(("server", submatch)) => {
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();

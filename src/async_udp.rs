@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use tokio::sync::mpsc::{Sender, Receiver};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::net::UdpSocket;
 
 use crate::pinger::{MsgType, PingReqResp};
@@ -31,8 +31,8 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     }
 }
 
-pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
-                                     to_client: Sender<PingReqResp>,
+pub(crate) async fn pinger_transport(mut from_generator: Receiver<PingReqResp>,
+                                     to_statista: Sender<PingReqResp>,
                                      local_address: SocketAddr,
                                      remote_address: SocketAddr) {
     let sock = UdpSocket::bind(local_address).await.expect("pinger: binding failed");
@@ -42,7 +42,7 @@ pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
         let mut buf = [0; 8];
 
         tokio::select! {
-            r_val = from_client.recv() => {
+            r_val = from_generator.recv() => {
                 match r_val {
                     Some(mut req) => {
                         // Sending request to socket
@@ -51,7 +51,7 @@ pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
 
                         sock.send(&index.to_be_bytes()).await.expect("tx: couldn't send message");
 
-                        to_client.send(req).await.expect("tx: couldn't send transformed request to client");
+                        to_statista.send(req).await.expect("tx: couldn't send transformed request to client");
                     }
                     None => break,
                 }
@@ -62,10 +62,10 @@ pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
                     let req = PingReqResp {
                         index: u64::from_be_bytes(buf),
                         timestamp: Instant::now(),
-                        t: MsgType::RESPONSE
+                        t: MsgType::Response
                     };
 
-                    to_client.send(req).await.unwrap();
+                    to_statista.send(req).await.unwrap();
                 }
                 else {
                     panic!("rx: Received not full number. {amt} instead of 8.");

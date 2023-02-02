@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use tokio::sync::mpsc::{Sender, Receiver};
+use tokio::sync::mpsc;
 use tokio::net::{TcpListener, TcpStream, TcpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -22,15 +22,14 @@ async fn server_connection_handler(mut sock:TcpStream) {
                 match sock.write_all(&buf).await {
                     Err(e) => {
                         println!("An error occurred during writing echo, \
-                                  terminating connection with {}: {}",
-                                 peer_addr, e);
+                                  terminating connection with {peer_addr}: {e}");
                     },
                     _ => continue,
                 }
             },
             Err(_) => {
                 println!("An error occurred during reading request, \
-                          terminating connection with {}", peer_addr);
+                          terminating connection with {peer_addr}");
                 break;
             }
         }
@@ -51,8 +50,8 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     }
 }
 
-pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
-                                     to_client: Sender<PingReqResp>,
+pub(crate) async fn pinger_transport(mut from_client: mpsc::Receiver<PingReqResp>,
+                                     to_statista: mpsc::Sender<PingReqResp>,
                                      local_address: SocketAddr,
                                      remote_address: SocketAddr) {
     let sock = TcpSocket::new_v4().unwrap();
@@ -72,7 +71,7 @@ pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
 
                         sock.write_all(&index.to_be_bytes()).await.expect("tx: couldn't send message");
 
-                        to_client.send(req).await.expect("tx: couldn't send transformed request to client");
+                        to_statista.send(req).await.expect("tx: couldn't send transformed request to client");
                     }
                     None => break,
                 }
@@ -83,10 +82,10 @@ pub(crate) async fn pinger_transport(mut from_client: Receiver<PingReqResp>,
                     let req = PingReqResp {
                         index: u64::from_be_bytes(buf),
                         timestamp: Instant::now(),
-                        t: MsgType::RESPONSE
+                        t: MsgType::Response
                     };
 
-                    to_client.send(req).await.unwrap();
+                    to_statista.send(req).await.unwrap();
                 }
                 else {
                     panic!("rx: Received not full number. {amt} instead of 8.");

@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::io;
 use std::time::Duration;
 
-use tokio;
 use tokio::sync::mpsc::{self, Sender, Receiver};
 
 use clap::{Command, Arg, ArgAction};
@@ -12,7 +11,7 @@ mod async_tcp;
 mod pinger;
 mod statistics;
 
-use pinger::PingReqResp;
+use pinger::{PingReqResp, SendMode};
 use statistics::PingRTT;
 
 
@@ -45,6 +44,15 @@ fn cli() -> Command {
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u64).range(1..))
                         .default_value("1000")
+                        .conflicts_with("adaptive-interval")
+                )
+                .arg(
+                    Arg::new("adaptive-interval")
+                        .long("adaptive-interval")
+                        .short('A')
+                        .help("Generate new request just after reception of responce")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("interval")
                 )
                 .arg(
                     Arg::new("wait-time")
@@ -91,22 +99,32 @@ async fn main() -> Result<(), io::Error> {
             let remote_address = submatch.get_one::<SocketAddr>("remote-address").unwrap();
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
             let interval = submatch.get_one::<u64>("interval").unwrap();
+            let adaptive = submatch.get_one::<bool>("adaptive-interval").unwrap();
             let wait_time = submatch.get_one::<u64>("wait-time").unwrap();
 
-            let (cl_txtr_tx, cl_txtr_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-            let (txtr_cl_tx, tr_cl_rx): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-            let (st_pr_tx, st_pr_rx): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
+            let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+            let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+            let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(channel_cap);
+
+            let (send_mode, txtr_gen) = if *adaptive {
+                let (txtr_gen_send, txtr_gen_recv): (Sender<u8>, Receiver<u8>) = mpsc::channel(channel_cap);
+
+                (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
+            }
+            else {
+                (SendMode::Interval(*interval), None)
+            };
 
             let pinger = match protocol.as_str() {
-                "tcp" => tokio::spawn(async_tcp::pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address)),
-                "udp" => tokio::spawn(async_udp::pinger_transport(cl_txtr_rx, txtr_cl_tx, *local_address, *remote_address)),
+                "tcp" => tokio::spawn(async_tcp::pinger_transport(gen_txtr_recv, txtr_stat_send, *local_address, *remote_address)),
+                "udp" => tokio::spawn(async_udp::pinger_transport(gen_txtr_recv, txtr_stat_send, *local_address, *remote_address)),
                 "icmp" => unimplemented!(),
                 _ => unreachable!(),
             };
 
-            let generator = tokio::spawn(pinger::generator(cl_txtr_tx, *interval));
-            let statista = tokio::spawn(statistics::statista(tr_cl_rx, st_pr_tx, Duration::from_millis(*wait_time)));
-            let presenter = tokio::spawn(statistics::presenter(st_pr_rx));
+            let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode));
+            let statista = tokio::spawn(statistics::statista(txtr_stat_recv, stat_pres_send, txtr_gen, Duration::from_millis(*wait_time)));
+            let presenter = tokio::spawn(statistics::presenter(stat_pres_recv));
 
             let _ = tokio::join!(pinger, generator, statista, presenter);
         },

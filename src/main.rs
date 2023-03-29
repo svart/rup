@@ -11,7 +11,7 @@ mod async_tcp;
 mod pinger;
 mod statistics;
 
-use pinger::{PingReqResp, SendMode};
+use pinger::{PingReqResp, SendMode, PING_HDR_LEN};
 
 
 fn cli() -> Command {
@@ -62,6 +62,20 @@ fn cli() -> Command {
                         .value_parser(clap::value_parser!(u64).range(1..))
                         .default_value("1000")
                 )
+                .arg(
+                    Arg::new("req-size")
+                        .long("request-size")
+                        .help("Size of echo request")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..))
+                )
+                .arg(
+                    Arg::new("resp-size")
+                        .long("response-size")
+                        .help("Size of echo response")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..))
+                )
         )
         .subcommand(
             Command::new("server")
@@ -100,6 +114,8 @@ async fn main() -> Result<(), io::Error> {
             let interval = submatch.get_one::<u64>("interval").unwrap();
             let adaptive = submatch.get_one::<bool>("adaptive-interval").unwrap();
             let wait_time = submatch.get_one::<u64>("wait-time").unwrap();
+            let request_size = submatch.get_one::<u16>("req-size").map_or(None, |x| Some(*x));
+            let response_size = submatch.get_one::<u16>("resp-size").map_or(None, |x| Some(*x));
 
             let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
             let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
@@ -114,8 +130,26 @@ async fn main() -> Result<(), io::Error> {
             };
 
             let pinger = match protocol.as_str() {
-                "tcp" => tokio::spawn(async_tcp::pinger_transport(gen_txtr_recv, txtr_stat_send, *local_address, *remote_address)),
-                "udp" => tokio::spawn(async_udp::pinger_transport(gen_txtr_recv, txtr_stat_send, *local_address, *remote_address)),
+                "tcp" => tokio::spawn(
+                    async_tcp::pinger_transport(
+                        gen_txtr_recv,
+                        txtr_stat_send,
+                        *local_address,
+                        *remote_address,
+                        request_size,
+                        response_size
+                    )
+                ),
+                "udp" => tokio::spawn(
+                    async_udp::pinger_transport(
+                        gen_txtr_recv,
+                        txtr_stat_send,
+                        *local_address,
+                        *remote_address,
+                        request_size,
+                        response_size
+                    )
+                ),
                 "icmp" => unimplemented!(),
                 _ => unreachable!(),
             };

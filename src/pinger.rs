@@ -1,8 +1,7 @@
 use std::time::{Instant, Duration};
 
+use serde::{Serialize, Deserialize};
 use tokio::{sync::mpsc, time};
-
-pub const PING_MSG_LEN: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) enum MsgType {
@@ -20,6 +19,15 @@ pub(crate) struct PingReqResp {
 pub(crate) enum SendMode {
     Adaptive(mpsc::Receiver<u8>),
     Interval(u64),
+}
+
+pub const PING_HDR_LEN: usize = 8 + 2 + 2;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Echo {
+    pub id: u64,
+    pub len: u16,
+    pub resp_size: u16,
 }
 
 pub(crate) async fn generator(to_tx_transport: mpsc::Sender<PingReqResp>,

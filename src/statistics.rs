@@ -40,7 +40,7 @@ async fn receive_timeout(index: u64,
 pub(crate) async fn statista(mut from_transport: Receiver<PingReqResp>,
                              to_generator: Option<Sender<u8>>,
                              wait_time: Duration) {
-    let req_lock: Arc<Mutex<VecDeque<PingReqResp>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let req_lock = Arc::new(Mutex::new(VecDeque::<PingReqResp>::new()));
     let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
 
     tokio::spawn(presenter(stat_pres_recv));
@@ -86,7 +86,7 @@ pub(crate) async fn statista(mut from_transport: Receiver<PingReqResp>,
             }
         }
         else {
-            panic!("statista: cannot read from transport");
+            return;
         }
     }
 }

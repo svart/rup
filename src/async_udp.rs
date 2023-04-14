@@ -8,6 +8,8 @@ use tokio::net::UdpSocket;
 use crate::pinger::{MsgType, PingReqResp, PING_HDR_LEN, Echo};
 
 pub(crate) async fn server_transport(local_address: SocketAddr) {
+    println!("Running UDP server listening {local_address}");
+
     let sock = UdpSocket::bind(local_address).await.expect("server: binding failed");
 
     let mut client_addrs: HashSet<SocketAddr> = HashSet::new();
@@ -75,7 +77,11 @@ pub(crate) async fn pinger_transport(
                     None => break,
                 }
             }
-            _ = sock.recv(&mut buf) => {
+            r_val = sock.recv(&mut buf) => {
+                if r_val.is_err() {
+                    break;
+                }
+
                 let p_resp: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
                 let req = PingReqResp {
                     index: p_resp.id,

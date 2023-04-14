@@ -31,9 +31,16 @@ pub(crate) struct Echo {
 }
 
 pub(crate) async fn generator(to_tx_transport: mpsc::Sender<PingReqResp>,
-                              mut send_mode: SendMode) {
+                              mut send_mode: SendMode,
+                              ping_number: Option<u64>) {
     let mut i: u64 = 0;
     loop {
+        if let Some(n) = ping_number {
+            if i >= n {
+                break;
+            }
+        }
+
         let req = PingReqResp {
             index: i,
             timestamp: Instant::now(),

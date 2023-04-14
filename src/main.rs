@@ -76,6 +76,14 @@ fn cli() -> Command {
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..))
                 )
+                .arg(
+                    Arg::new("ping-number")
+                        .long("ping-number")
+                        .short('n')
+                        .help("Amount of ping packets to send")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u64).range(1..))
+                )
         )
         .subcommand(
             Command::new("server")
@@ -114,8 +122,9 @@ async fn main() -> Result<(), io::Error> {
             let interval = submatch.get_one::<u64>("interval").unwrap();
             let adaptive = submatch.get_one::<bool>("adaptive-interval").unwrap();
             let wait_time = submatch.get_one::<u64>("wait-time").unwrap();
-            let request_size = submatch.get_one::<u16>("req-size").map_or(None, |x| Some(*x));
-            let response_size = submatch.get_one::<u16>("resp-size").map_or(None, |x| Some(*x));
+            let request_size = submatch.get_one::<u16>("req-size").copied();
+            let response_size = submatch.get_one::<u16>("resp-size").copied();
+            let ping_number = submatch.get_one::<u64>("ping-number").copied();
 
             let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
             let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
@@ -154,7 +163,7 @@ async fn main() -> Result<(), io::Error> {
                 _ => unreachable!(),
             };
 
-            let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode));
+            let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode, ping_number));
             let statista = tokio::spawn(statistics::statista(txtr_stat_recv, txtr_gen, Duration::from_millis(*wait_time)));
 
             let _ = tokio::join!(pinger, generator, statista);

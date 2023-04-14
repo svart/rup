@@ -119,7 +119,11 @@ pub(crate) async fn pinger_transport(
                     None => break,
                 }
             }
-            _ = sock.read(&mut buf) => {
+            r_val = sock.read(&mut buf) => {
+                if r_val.is_err() {
+                    break;
+                }
+
                 let p_resp: Echo = bincode::deserialize(&buf).unwrap();
 
                 let req = PingReqResp {

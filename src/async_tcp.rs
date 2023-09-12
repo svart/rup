@@ -1,13 +1,13 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use tokio::sync::mpsc;
-use tokio::net::{TcpListener, TcpStream, TcpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::mpsc;
 
-use crate::pinger::{MsgType, PingReqResp, PING_HDR_LEN, Echo};
+use crate::pinger::{Echo, MsgType, PingReqResp, PING_HDR_LEN};
 
-async fn server_connection_handler(mut sock:TcpStream) {
+async fn server_connection_handler(mut sock: TcpStream) {
     let peer_addr = sock.peer_addr().unwrap();
     println!("New TCP connection from {peer_addr}");
 
@@ -16,7 +16,7 @@ async fn server_connection_handler(mut sock:TcpStream) {
     loop {
         match sock.read(&mut hdr_buf).await {
             Ok(0) => {
-                println!("Connection closed: {peer_addr}", );
+                println!("Connection closed: {peer_addr}",);
                 break;
             }
             Ok(amt) => {
@@ -31,10 +31,12 @@ async fn server_connection_handler(mut sock:TcpStream) {
                             println!("Connection closed: {peer_addr}");
                             break;
                         }
-                        Ok(_) => { }
+                        Ok(_) => {}
                         Err(_) => {
-                            println!("An error occurred during reading request, \
-                                    terminating connection with {peer_addr}");
+                            println!(
+                                "An error occurred during reading request, \
+                                    terminating connection with {peer_addr}"
+                            );
                             break;
                         }
                     }
@@ -47,16 +49,20 @@ async fn server_connection_handler(mut sock:TcpStream) {
 
                 match sock.write_all(&send_buf).await {
                     Err(e) => {
-                        println!("An error occured during writing echo, \
-                                    terminating connection with {peer_addr}: {e}");
+                        println!(
+                            "An error occured during writing echo, \
+                                    terminating connection with {peer_addr}: {e}"
+                        );
                         break;
                     }
-                    _ => continue
+                    _ => continue,
                 }
-            },
+            }
             Err(_) => {
-                println!("An error occurred during reading request, \
-                          terminating connection with {peer_addr}");
+                println!(
+                    "An error occurred during reading request, \
+                          terminating connection with {peer_addr}"
+                );
                 break;
             }
         }
@@ -65,13 +71,15 @@ async fn server_connection_handler(mut sock:TcpStream) {
 
 pub(crate) async fn server_transport(local_address: SocketAddr) {
     println!("Running TCP server listening {local_address}");
-    let listen_sock = TcpListener::bind(local_address).await.expect("server: binding failed");
+    let listen_sock = TcpListener::bind(local_address)
+        .await
+        .expect("server: binding failed");
 
     loop {
         match listen_sock.accept().await {
             Ok((socket, _)) => {
                 tokio::spawn(server_connection_handler(socket));
-            },
+            }
             Err(e) => println!("Connection failed: {e}"),
         }
     }
@@ -83,11 +91,14 @@ pub(crate) async fn pinger_transport(
     local_address: SocketAddr,
     remote_address: SocketAddr,
     request_size: Option<u16>,
-    response_size: Option<u16>
+    response_size: Option<u16>,
 ) {
     let sock = TcpSocket::new_v4().unwrap();
     sock.bind(local_address).expect("pinger: bind failed");
-    let mut sock = sock.connect(remote_address).await.expect("pinger: connection failed");
+    let mut sock = sock
+        .connect(remote_address)
+        .await
+        .expect("pinger: connection failed");
 
     let mut buf = [0; PING_HDR_LEN];
 

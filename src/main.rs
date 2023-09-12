@@ -1,18 +1,17 @@
-use std::net::SocketAddr;
 use std::io;
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, Sender, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use clap::{Command, Arg, ArgAction};
+use clap::{Arg, ArgAction, Command};
 
-mod async_udp;
 mod async_tcp;
+mod async_udp;
 mod pinger;
 mod statistics;
 
 use pinger::{PingReqResp, SendMode, PING_HDR_LEN};
-
 
 fn cli() -> Command {
     Command::new("rup")
@@ -25,7 +24,7 @@ fn cli() -> Command {
                         .help("Were to send echo requests")
                         .action(ArgAction::Set)
                         .required(true)
-                        .value_parser(clap::value_parser!(SocketAddr))
+                        .value_parser(clap::value_parser!(SocketAddr)),
                 )
                 .arg(
                     Arg::new("local-address")
@@ -33,7 +32,7 @@ fn cli() -> Command {
                         .help("Set local address to bind to")
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(SocketAddr))
-                        .default_value("0.0.0.0:0")
+                        .default_value("0.0.0.0:0"),
                 )
                 .arg(
                     Arg::new("interval")
@@ -43,7 +42,7 @@ fn cli() -> Command {
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u64).range(1..))
                         .default_value("1000")
-                        .conflicts_with("adaptive-interval")
+                        .conflicts_with("adaptive-interval"),
                 )
                 .arg(
                     Arg::new("adaptive-interval")
@@ -51,7 +50,7 @@ fn cli() -> Command {
                         .short('A')
                         .help("Generate new request just after reception of responce")
                         .action(ArgAction::SetTrue)
-                        .conflicts_with("interval")
+                        .conflicts_with("interval"),
                 )
                 .arg(
                     Arg::new("wait-time")
@@ -60,21 +59,21 @@ fn cli() -> Command {
                         .help("Time to wait for responce im ms")
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u64).range(1..))
-                        .default_value("1000")
+                        .default_value("1000"),
                 )
                 .arg(
                     Arg::new("req-size")
                         .long("request-size")
                         .help("Size of echo request")
                         .action(ArgAction::Set)
-                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..))
+                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
                 )
                 .arg(
                     Arg::new("resp-size")
                         .long("response-size")
                         .help("Size of echo response")
                         .action(ArgAction::Set)
-                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..))
+                        .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
                 )
                 .arg(
                     Arg::new("ping-number")
@@ -82,8 +81,8 @@ fn cli() -> Command {
                         .short('n')
                         .help("Amount of ping packets to send")
                         .action(ArgAction::Set)
-                        .value_parser(clap::value_parser!(u64).range(1..))
-                )
+                        .value_parser(clap::value_parser!(u64).range(1..)),
+                ),
         )
         .subcommand(
             Command::new("server")
@@ -93,8 +92,8 @@ fn cli() -> Command {
                         .help("Which address to listen to")
                         .action(ArgAction::Set)
                         .required(true)
-                        .value_parser(clap::value_parser!(SocketAddr))
-                )
+                        .value_parser(clap::value_parser!(SocketAddr)),
+                ),
         )
         .arg(
             Arg::new("protocol")
@@ -103,7 +102,7 @@ fn cli() -> Command {
                 .help("Set protocol to use for ping")
                 .action(ArgAction::Set)
                 .value_parser(["tcp", "udp", "icmp"])
-                .default_value("udp")
+                .default_value("udp"),
         )
 }
 
@@ -126,48 +125,50 @@ async fn main() -> Result<(), io::Error> {
             let response_size = submatch.get_one::<u16>("resp-size").copied();
             let ping_number = submatch.get_one::<u64>("ping-number").copied();
 
-            let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
-            let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) = mpsc::channel(channel_cap);
+            let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) =
+                mpsc::channel(channel_cap);
+            let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) =
+                mpsc::channel(channel_cap);
 
             let (send_mode, txtr_gen) = if *adaptive {
-                let (txtr_gen_send, txtr_gen_recv): (Sender<u8>, Receiver<u8>) = mpsc::channel(channel_cap);
+                let (txtr_gen_send, txtr_gen_recv): (Sender<u8>, Receiver<u8>) =
+                    mpsc::channel(channel_cap);
 
                 (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
-            }
-            else {
+            } else {
                 (SendMode::Interval(*interval), None)
             };
 
             let pinger = match protocol.as_str() {
-                "tcp" => tokio::spawn(
-                    async_tcp::pinger_transport(
-                        gen_txtr_recv,
-                        txtr_stat_send,
-                        *local_address,
-                        *remote_address,
-                        request_size,
-                        response_size
-                    )
-                ),
-                "udp" => tokio::spawn(
-                    async_udp::pinger_transport(
-                        gen_txtr_recv,
-                        txtr_stat_send,
-                        *local_address,
-                        *remote_address,
-                        request_size,
-                        response_size
-                    )
-                ),
+                "tcp" => tokio::spawn(async_tcp::pinger_transport(
+                    gen_txtr_recv,
+                    txtr_stat_send,
+                    *local_address,
+                    *remote_address,
+                    request_size,
+                    response_size,
+                )),
+                "udp" => tokio::spawn(async_udp::pinger_transport(
+                    gen_txtr_recv,
+                    txtr_stat_send,
+                    *local_address,
+                    *remote_address,
+                    request_size,
+                    response_size,
+                )),
                 "icmp" => unimplemented!(),
                 _ => unreachable!(),
             };
 
             let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode, ping_number));
-            let statista = tokio::spawn(statistics::statista(txtr_stat_recv, txtr_gen, Duration::from_millis(*wait_time)));
+            let statista = tokio::spawn(statistics::statista(
+                txtr_stat_recv,
+                txtr_gen,
+                Duration::from_millis(*wait_time),
+            ));
 
             let _ = tokio::join!(pinger, generator, statista);
-        },
+        }
         Some(("server", submatch)) => {
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
 
@@ -179,8 +180,8 @@ async fn main() -> Result<(), io::Error> {
             };
 
             let _ = tokio::join!(server);
-        },
-        _ => unreachable!()
+        }
+        _ => unreachable!(),
     }
 
     Ok(())

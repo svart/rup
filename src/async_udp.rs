@@ -1,16 +1,18 @@
-use std::net::SocketAddr;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::time::Instant;
 
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::pinger::{MsgType, PingReqResp, PING_HDR_LEN, Echo};
+use crate::pinger::{Echo, MsgType, PingReqResp, PING_HDR_LEN};
 
 pub(crate) async fn server_transport(local_address: SocketAddr) {
     println!("Running UDP server listening {local_address}");
 
-    let sock = UdpSocket::bind(local_address).await.expect("server: binding failed");
+    let sock = UdpSocket::bind(local_address)
+        .await
+        .expect("server: binding failed");
 
     let mut client_addrs: HashSet<SocketAddr> = HashSet::new();
 
@@ -42,10 +44,14 @@ pub(crate) async fn pinger_transport(
     local_address: SocketAddr,
     remote_address: SocketAddr,
     request_size: Option<u16>,
-    response_size: Option<u16>
+    response_size: Option<u16>,
 ) {
-    let sock = UdpSocket::bind(local_address).await.expect("pinger: binding failed");
-    sock.connect(remote_address).await.expect("pinger: connect function failed");
+    let sock = UdpSocket::bind(local_address)
+        .await
+        .expect("pinger: binding failed");
+    sock.connect(remote_address)
+        .await
+        .expect("pinger: connect function failed");
 
     let mut buf = [0; u16::MAX as usize];
 

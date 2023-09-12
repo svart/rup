@@ -1,6 +1,6 @@
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, time};
 
 #[derive(Clone, Debug)]
@@ -30,9 +30,11 @@ pub(crate) struct Echo {
     pub resp_size: u16,
 }
 
-pub(crate) async fn generator(to_tx_transport: mpsc::Sender<PingReqResp>,
-                              mut send_mode: SendMode,
-                              ping_number: Option<u64>) {
+pub(crate) async fn generator(
+    to_tx_transport: mpsc::Sender<PingReqResp>,
+    mut send_mode: SendMode,
+    ping_number: Option<u64>,
+) {
     let mut i: u64 = 0;
     loop {
         if let Some(n) = ping_number {
@@ -44,7 +46,7 @@ pub(crate) async fn generator(to_tx_transport: mpsc::Sender<PingReqResp>,
         let req = PingReqResp {
             index: i,
             timestamp: Instant::now(),
-            t: MsgType::Request
+            t: MsgType::Request,
         };
 
         if let Err(err) = to_tx_transport.send(req).await {
@@ -57,9 +59,7 @@ pub(crate) async fn generator(to_tx_transport: mpsc::Sender<PingReqResp>,
                     panic!("generator: cannot receive from transport");
                 }
             }
-            SendMode::Interval(interval) => {
-                time::sleep(Duration::from_millis(*interval)).await
-            },
+            SendMode::Interval(interval) => time::sleep(Duration::from_millis(*interval)).await,
         }
         i += 1;
     }

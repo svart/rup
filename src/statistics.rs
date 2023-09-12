@@ -71,7 +71,7 @@ pub(crate) async fn statista(
                     while let Some(req) = requests.pop_front() {
                         match index.cmp(&req.index) {
                             Ordering::Greater => {
-                                println!("response reordering or lost");
+                                println!("seq: {index} response reordering or loss");
                                 continue;
                             }
                             Ordering::Equal => {
@@ -99,7 +99,56 @@ pub(crate) async fn statista(
 }
 
 async fn presenter(mut from_statista: Receiver<PingRTT>) {
-    while let Some(rtt) = from_statista.recv().await {
-        println!("seq: {} rtt: {:#?}", rtt.index, rtt.rtt);
+    let mut sequence = RttSequence::new();
+
+    while let Some(timestamp) = from_statista.recv().await {
+        println!("seq: {} rtt: {:#?}", timestamp.index, timestamp.rtt);
+        sequence.add(timestamp.rtt);
+    }
+    sequence.print_stats();
+}
+
+struct RttSequence(Vec<Duration>);
+
+impl RttSequence {
+    fn new() -> Self {
+        RttSequence(Vec::with_capacity(1024))
+    }
+
+    fn add(&mut self, rtt: Duration) {
+        self.0.push(rtt)
+    }
+
+    fn mean(&self) -> Duration {
+        let avg = self.0.iter().sum::<Duration>().as_nanos() / self.0.len() as u128;
+        Duration::from_nanos(u64::try_from(avg).unwrap())
+    }
+
+    fn std_deviation(&self) -> Duration {
+        let avg = self.mean();
+
+        let variance = self.0
+            .iter()
+            .map(|value| {
+                let diff = avg.as_nanos() - (*value).as_nanos();
+                diff * diff
+            })
+            .sum::<u128>() as f64 / self.0.len() as f64;
+
+        Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.)
+    }
+
+    fn print_stats(&self) {
+        if self.0.is_empty() {
+            println!("no statistics collected");
+            return;
+        }
+
+        let min = self.0.iter().min().unwrap();
+        let max = self.0.iter().max().unwrap();
+        let avg = self.mean();
+        let std_dev = self.std_deviation();
+
+        println!("rtt min/avg/max/std_dev = {min:?}/{avg:?}/{max:?}/{std_dev:?}");
     }
 }

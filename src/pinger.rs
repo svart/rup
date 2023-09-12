@@ -55,11 +55,26 @@ pub(crate) async fn generator(
 
         match &mut send_mode {
             SendMode::Adaptive(channel) => {
-                if channel.recv().await.is_none() {
-                    panic!("generator: cannot receive from transport");
+                tokio::select! {
+                    r_val = channel.recv() => {
+                        if r_val.is_none() {
+                            panic!("generator: cannot receive from transport");
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        return;
+                    }
                 }
             }
-            SendMode::Interval(interval) => time::sleep(Duration::from_millis(*interval)).await,
+            SendMode::Interval(interval) => {
+                tokio::select! {
+                    _ = time::sleep(Duration::from_millis(*interval)) => {},
+                    _ = tokio::signal::ctrl_c() => {
+                        return;
+                    }
+                }
+
+            }
         }
         i += 1;
     }

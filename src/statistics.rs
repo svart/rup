@@ -130,7 +130,7 @@ impl RttSequence {
         let variance = self.0
             .iter()
             .map(|value| {
-                let diff = avg.as_nanos() - (*value).as_nanos();
+                let diff = avg.as_nanos().abs_diff((*value).as_nanos());
                 diff * diff
             })
             .sum::<u128>() as f64 / self.0.len() as f64;

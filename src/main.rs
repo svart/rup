@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use clap::{Arg, ArgAction, Command};
+use tokio::runtime;
 
 mod async_tcp;
 mod async_udp;
@@ -106,13 +107,17 @@ fn cli() -> Command {
         )
 }
 
-#[tokio::main]
-async fn main() -> Result<(), io::Error> {
+fn main() -> Result<(), io::Error> {
     let matches = cli().get_matches();
 
     let channel_cap: usize = 32;
 
     let protocol = matches.get_one::<String>("protocol").unwrap();
+
+    let rt = runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()?;
 
     match matches.subcommand() {
         Some(("client", submatch)) => {
@@ -140,7 +145,7 @@ async fn main() -> Result<(), io::Error> {
             };
 
             let pinger = match protocol.as_str() {
-                "tcp" => tokio::spawn(async_tcp::pinger_transport(
+                "tcp" => rt.spawn(async_tcp::pinger_transport(
                     gen_txtr_recv,
                     txtr_stat_send,
                     *local_address,
@@ -148,7 +153,7 @@ async fn main() -> Result<(), io::Error> {
                     request_size,
                     response_size,
                 )),
-                "udp" => tokio::spawn(async_udp::pinger_transport(
+                "udp" => rt.spawn(async_udp::pinger_transport(
                     gen_txtr_recv,
                     txtr_stat_send,
                     *local_address,
@@ -160,26 +165,32 @@ async fn main() -> Result<(), io::Error> {
                 _ => unreachable!(),
             };
 
-            let generator = tokio::spawn(pinger::generator(gen_txtr_send, send_mode, ping_number));
-            let statista = tokio::spawn(statistics::statista(
+            let generator = rt.spawn(pinger::generator(gen_txtr_send, send_mode, ping_number));
+            let statista = rt.spawn(statistics::statista(
                 txtr_stat_recv,
                 txtr_gen,
                 Duration::from_millis(*wait_time),
             ));
 
-            let _ = tokio::join!(pinger, generator, statista);
+            rt.block_on(async {
+                pinger.await.unwrap();
+                generator.await.unwrap();
+                statista.await.unwrap();
+            });
         }
         Some(("server", submatch)) => {
             let local_address = submatch.get_one::<SocketAddr>("local-address").unwrap();
 
             let server = match protocol.as_str() {
-                "tcp" => tokio::spawn(async_tcp::server_transport(*local_address)),
-                "udp" => tokio::spawn(async_udp::server_transport(*local_address)),
+                "tcp" => rt.spawn(async_tcp::server_transport(*local_address)),
+                "udp" => rt.spawn(async_udp::server_transport(*local_address)),
                 "icmp" => panic!("there is no server for icmp"),
                 _ => unreachable!(),
             };
 
-            let _ = tokio::join!(server);
+            rt.block_on(async {
+                server.await.unwrap();
+            });
         }
         _ => unreachable!(),
     }

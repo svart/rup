@@ -138,17 +138,25 @@ impl RttSequence {
         Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.)
     }
 
-    fn print_stats(&self) {
+    fn print_stats(&mut self) {
         if self.0.is_empty() {
             println!("no statistics collected");
             return;
         }
 
+        self.0.sort();
+
         let min = self.0.iter().min().unwrap();
         let max = self.0.iter().max().unwrap();
         let avg = self.mean();
         let std_dev = self.std_deviation();
+        let median = self.0.iter().nth(self.0.len() / 2).unwrap();
 
-        println!("rtt min/avg/max/std_dev = {min:?}/{avg:?}/{max:?}/{std_dev:?}");
+        println!("\nRTT statistics:");
+        println!("min = {min:?}");
+        println!("med = {median:?}");
+        println!("avg = {avg:?}");
+        println!("std_dev = {std_dev:?}");
+        println!("max = {max:?}");
     }
 }

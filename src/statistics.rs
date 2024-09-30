@@ -150,7 +150,7 @@ impl RttSequence {
         let max = self.0.iter().max().unwrap();
         let avg = self.mean();
         let std_dev = self.std_deviation();
-        let median = self.0.iter().nth(self.0.len() / 2).unwrap();
+        let median = self.0.get(self.0.len() / 2).unwrap();
 
         println!("\nRTT statistics:");
         println!("min = {min:?}");

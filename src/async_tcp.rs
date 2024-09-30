@@ -23,8 +23,7 @@ async fn server_connection_handler(mut sock: TcpStream) {
                 let mut req: Echo = bincode::deserialize(&hdr_buf).unwrap();
 
                 if req.len as usize > amt {
-                    let mut for_read_buf = Vec::new();
-                    for_read_buf.resize(req.len as usize - amt, 0);
+                    let mut for_read_buf = vec![0; req.len as usize - amt];
 
                     match sock.read(&mut for_read_buf).await {
                         Ok(0) => {
@@ -144,8 +143,7 @@ pub(crate) async fn pinger_transport(
                 };
 
                 if p_resp.len as usize > PING_HDR_LEN {
-                    let mut for_read_buf = Vec::new();
-                    for_read_buf.resize(p_resp.len as usize - PING_HDR_LEN, 0);
+                    let mut for_read_buf = vec![0; p_resp.len as usize - PING_HDR_LEN];
 
                     match sock.read(&mut for_read_buf).await {
                         Ok(0) => {

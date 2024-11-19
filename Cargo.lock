@@ -225,6 +225,7 @@ dependencies = [
  "bincode",
  "clap",
  "serde",
+ "socket2",
  "tokio",
 ]
 

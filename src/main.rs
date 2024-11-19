@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use pinger::{PingReqResp, SendMode};
 use crate::cli::CliParams::{PingerParams, ServerParams};
 
+mod async_icmp;
 mod async_tcp;
 mod async_udp;
 mod pinger;
@@ -56,7 +57,14 @@ fn main() -> Result<(), io::Error> {
                     params.request_size,
                     params.response_size,
                 )),
-                "icmp" => unimplemented!(),
+                "icmp" => rt.spawn(async_icmp::pinger_transport(
+                    gen_txtr_recv,
+                    txtr_stat_send,
+                    params.local_address,
+                    params.remote_address,
+                    params.request_size,
+                    params.response_size,
+                )),
                 _ => unreachable!(),
             };
 

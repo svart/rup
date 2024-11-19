@@ -62,7 +62,7 @@ pub(crate) async fn pinger_transport(
                         send_buf[2] = (checksum >> 8) as u8;
                         send_buf[3] = (checksum & 0xff) as u8;
 
-                        println!("Buffer to send: {:02X?}", send_buf);
+                        // println!("Buffer to send: {:02X?}", send_buf);
 
                         sock.send(&send_buf).await.expect("tx: should send to socket normally");
                         to_statista.send(req).await.expect("tx: should send request to stats normally");
@@ -75,7 +75,7 @@ pub(crate) async fn pinger_transport(
                     break;
                 }
 
-                println!("Recv buffer: {:02X?}", &buf[IP_HEADER_LEN..r_val.unwrap()]);
+                // println!("Recv buffer: {:02X?}", &buf[IP_HEADER_LEN..r_val.unwrap()]);
 
                 const DATA_OFFSET: usize = IP_HEADER_LEN + ICMP_HEADER_LEN;
                 let p_resp: Echo = bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();

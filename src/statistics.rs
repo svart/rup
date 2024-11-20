@@ -6,7 +6,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::pinger::{MsgType, PingReqResp};
+use crate::pinger::{Entry, StatEntry};
 
 #[derive(Debug)]
 struct PingRTT {
@@ -16,21 +16,21 @@ struct PingRTT {
 
 async fn receive_timeout(
     index: u64,
-    req_mutex: Arc<Mutex<VecDeque<PingReqResp>>>,
+    req_mutex: Arc<Mutex<VecDeque<Entry>>>,
     wait_time: Duration,
-    to_generator: Option<Sender<u8>>,
+    to_generator: Option<Sender<()>>,
 ) {
     sleep(wait_time).await;
 
     let mut requests = req_mutex.lock().await;
 
     while let Some(req) = requests.front() {
-        if req.index <= index {
+        if req.id <= index {
             requests.pop_front();
             println!("seq: {index} request timeout");
 
             if let Some(gen_channel) = &to_generator {
-                gen_channel.send(0).await.unwrap();
+                gen_channel.send(()).await.unwrap();
             }
         } else {
             break;
@@ -39,73 +39,80 @@ async fn receive_timeout(
 }
 
 pub(crate) async fn statista(
-    mut from_transport: Receiver<PingReqResp>,
-    to_generator: Option<Sender<u8>>,
+    mut from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
     wait_time: Duration,
 ) {
-    let req_lock = Arc::new(Mutex::new(VecDeque::<PingReqResp>::new()));
+    let req_lock = Arc::new(Mutex::new(VecDeque::<Entry>::new()));
     let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
 
     tokio::spawn(presenter(stat_pres_recv));
 
-    loop {
-        if let Some(resp) = from_transport.recv().await {
-            match resp.t {
-                MsgType::Request => {
-                    tokio::spawn(receive_timeout(
-                        resp.index,
-                        req_lock.clone(),
-                        wait_time,
-                        to_generator.clone(),
-                    ));
+    // TODO: add another arm to listen on ctrl-c to exit immediately
+    while let Some(resp) = from_transport.recv().await {
+        match resp {
+            StatEntry::Open(t) => {
+                println!("statista: got request");
+                tokio::spawn(receive_timeout(
+                    t.id,
+                    req_lock.clone(),
+                    wait_time,
+                    to_generator.clone(),
+                ));
 
-                    let mut requests = req_lock.lock().await;
+                let mut requests = req_lock.lock().await;
 
-                    requests.push_back(resp);
-                }
-                MsgType::Response => {
-                    let index = resp.index;
+                requests.push_back(t);
+            }
+            StatEntry::Close(t) => {
+                println!("statista: got response");
+                let index = t.id;
 
-                    let mut requests = req_lock.lock().await;
+                let mut requests = req_lock.lock().await;
 
-                    while let Some(req) = requests.pop_front() {
-                        match index.cmp(&req.index) {
-                            Ordering::Greater => {
-                                println!("seq: {index} response reordering or loss");
-                                continue;
-                            }
-                            Ordering::Equal => {
-                                let timestamp = PingRTT {
-                                    index,
-                                    rtt: resp.timestamp.duration_since(req.timestamp),
-                                };
-
-                                if let Some(gen_channel) = &to_generator {
-                                    gen_channel.send(0).await.unwrap();
-                                }
-
-                                stat_pres_send.send(timestamp).await.unwrap();
-                            }
-                            Ordering::Less => requests.push_front(req),
+                while let Some(req) = requests.pop_front() {
+                    match index.cmp(&req.id) {
+                        Ordering::Greater => {
+                            println!("seq: {index} response reordering or loss");
+                            continue;
                         }
-                        break;
+                        Ordering::Equal => {
+                            let timestamp = PingRTT {
+                                index,
+                                rtt: t.ts.duration_since(req.ts),
+                            };
+
+                            if let Some(gen_channel) = &to_generator {
+                                gen_channel.send(()).await.unwrap();
+                            }
+
+                            stat_pres_send.send(timestamp).await.expect("statista: should send request to presenter normally");
+                        }
+                        Ordering::Less => requests.push_front(req),
                     }
+                    break;
                 }
             }
-        } else {
-            return;
         }
     }
+
+    // TODO:
+    // Here generator is finished.
+    // Send signal to transport receiver to finish if there are no pending requests.
+    // Otherwise wait till `requests` is empty and then send signal.
+    println!("statista: finished receiving");
 }
 
 async fn presenter(mut from_statista: Receiver<PingRTT>) {
     let mut sequence = RttSequence::new();
 
+    println!("presenter: started");
     while let Some(timestamp) = from_statista.recv().await {
         println!("seq: {} rtt: {:#?}", timestamp.index, timestamp.rtt);
         sequence.add(timestamp.rtt);
     }
     sequence.print_stats();
+    println!("presenter: finished");
 }
 
 struct RttSequence(Vec<Duration>);

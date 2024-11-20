@@ -5,14 +5,16 @@ use tokio::runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::cli::CliParams::{PingerParams, ServerParams};
-use pinger::{PingReqResp, SendMode};
+use pinger::{SendMode, StatEntry};
 
-mod async_icmp;
-mod async_tcp;
-mod async_udp;
+mod transport;
 mod cli;
 mod pinger;
 mod statistics;
+
+use transport::async_udp::UdpClientTransport;
+use transport::transmitter;
+use pinger::Request;
 
 fn main() -> Result<(), io::Error> {
     let channel_cap: usize = 32;
@@ -26,13 +28,13 @@ fn main() -> Result<(), io::Error> {
 
     match cli_params {
         PingerParams(params) => {
-            let (gen_txtr_send, gen_txtr_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) =
+            let (gen_txtr_send, gen_txtr_recv): (Sender<Request>, Receiver<Request>) =
                 mpsc::channel(channel_cap);
-            let (txtr_stat_send, txtr_stat_recv): (Sender<PingReqResp>, Receiver<PingReqResp>) =
+            let (txtr_stat_send, txtr_stat_recv): (Sender<StatEntry>, Receiver<StatEntry>) =
                 mpsc::channel(channel_cap);
 
             let (send_mode, txtr_gen) = if params.adaptive {
-                let (txtr_gen_send, txtr_gen_recv): (Sender<u8>, Receiver<u8>) =
+                let (txtr_gen_send, txtr_gen_recv): (Sender<()>, Receiver<()>) =
                     mpsc::channel(channel_cap);
 
                 (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
@@ -40,56 +42,53 @@ fn main() -> Result<(), io::Error> {
                 (SendMode::Interval(params.interval), None)
             };
 
-            let pinger = match params.protocol.as_str() {
-                "tcp" => rt.spawn(async_tcp::pinger_transport(
-                    gen_txtr_recv,
-                    txtr_stat_send,
-                    params.local_address,
-                    params.remote_address,
-                    params.request_size,
-                    params.response_size,
-                )),
-                "udp" => rt.spawn(async_udp::pinger_transport(
-                    gen_txtr_recv,
-                    txtr_stat_send,
-                    params.local_address,
-                    params.remote_address,
-                    params.request_size,
-                    params.response_size,
-                )),
-                "icmp" => rt.spawn(async_icmp::pinger_transport(
-                    gen_txtr_recv,
-                    txtr_stat_send,
-                    params.local_address,
-                    params.remote_address,
-                    params.request_size,
-                    params.response_size,
-                )),
-                _ => unreachable!(),
-            };
-
-            let generator = rt.spawn(pinger::generator(
-                gen_txtr_send,
-                send_mode,
-                params.ping_number,
-                params.run_time,
-            ));
-            let statista = rt.spawn(statistics::statista(
-                txtr_stat_recv,
-                txtr_gen,
-                Duration::from_millis(params.wait_time),
-            ));
-
             rt.block_on(async {
-                pinger.await.unwrap();
+                let transport = match params.protocol.as_str() {
+                    // "tcp" => tokio::spawn(async_tcp::pinger_transport(
+                    //     gen_txtr_recv,
+                    //     txtr_stat_send,
+                    //     params.local_address,
+                    //     params.remote_address,
+                    //     params.request_size,
+                    //     params.response_size,
+                    // )),
+                    "udp" => UdpClientTransport::new(params.local_address, params.remote_address).await,
+                    // "icmp" => tokio::spawn(async_icmp::pinger_transport(
+                    //     gen_txtr_recv,
+                    //     txtr_stat_send,
+                    //     params.local_address,
+                    //     params.remote_address,
+                    //     params.request_size,
+                    //     params.response_size,
+                    // )),
+                    _ => unreachable!(),
+                };
+
+                let transmitter = tokio::spawn(transmitter(transport, gen_txtr_recv, txtr_stat_send));
+
+                let generator = tokio::spawn(pinger::generator(
+                    gen_txtr_send,
+                    send_mode,
+                    params.ping_number,
+                    params.run_time,
+                    params.request_size,
+                    params.response_size,
+                ));
+                let statista = tokio::spawn(statistics::statista(
+                    txtr_stat_recv,
+                    txtr_gen,
+                    Duration::from_millis(params.wait_time),
+                ));
+
+                transmitter.await.unwrap();
                 generator.await.unwrap();
                 statista.await.unwrap();
             });
         }
         ServerParams(params) => {
             let server = match params.protocol.as_str() {
-                "tcp" => rt.spawn(async_tcp::server_transport(params.local_address)),
-                "udp" => rt.spawn(async_udp::server_transport(params.local_address)),
+                "tcp" => rt.spawn(transport::async_tcp::server_transport(params.local_address)),
+                "udp" => rt.spawn(transport::async_udp::server_transport(params.local_address)),
                 "icmp" => panic!("there is no server for icmp"),
                 _ => unreachable!(),
             };

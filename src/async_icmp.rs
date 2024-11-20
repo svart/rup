@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Instant};
+use std::{net::{Ipv4Addr, SocketAddr}, time::Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -62,7 +62,8 @@ pub(crate) async fn pinger_transport(
                         send_buf[2] = (checksum >> 8) as u8;
                         send_buf[3] = (checksum & 0xff) as u8;
 
-                        // println!("Buffer to send: {:02X?}", send_buf);
+                        // println!("TX ICMP: {:02X?}", &send_buf[..ICMP_HEADER_LEN]);
+                        // println!("TX DATA: {:02X?}", &send_buf[ICMP_HEADER_LEN..]);
 
                         sock.send(&send_buf).await.expect("tx: should send to socket normally");
                         to_statista.send(req).await.expect("tx: should send request to stats normally");
@@ -75,16 +76,21 @@ pub(crate) async fn pinger_transport(
                     break;
                 }
 
-                // println!("Recv buffer: {:02X?}", &buf[IP_HEADER_LEN..r_val.unwrap()]);
-
                 const DATA_OFFSET: usize = IP_HEADER_LEN + ICMP_HEADER_LEN;
-                let p_resp: Echo = bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
-                let req = PingReqResp {
-                    index: p_resp.id,
-                    timestamp: Instant::now(),
-                    t: MsgType::Response,
-                };
-                to_statista.send(req).await.unwrap();
+
+                // println!("RX IP:   {:02X?}", &buf[..IP_HEADER_LEN]);
+                // println!("RX ICMP: {:02X?}", &buf[IP_HEADER_LEN..IP_HEADER_LEN + ICMP_HEADER_LEN]);
+                // println!("RX DATA: {:02X?}", &buf[DATA_OFFSET..]);
+
+                if good_packet(&buf, &remote_address) {
+                    let p_resp: Echo = bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+                    let req = PingReqResp {
+                        index: p_resp.id,
+                        timestamp: Instant::now(),
+                        t: MsgType::Response,
+                    };
+                    to_statista.send(req).await.unwrap();
+                }
             }
         }
     }
@@ -111,4 +117,22 @@ fn csum16_slice(data: &[u8]) -> u16 {
     }
 
     !csum
+}
+
+fn good_packet(buf: &[u8], remote_address: &SocketAddr) -> bool {
+    let ip = &buf[..IP_HEADER_LEN];
+    let ip_addr = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
+    if remote_address.ip() != ip_addr {
+        return false;
+    }
+
+    let icmp = &buf[IP_HEADER_LEN..IP_HEADER_LEN + ICMP_HEADER_LEN];
+    if icmp[0] != 0x00 || icmp[1] != 0x00 {
+        return false;
+    }
+    if icmp[4] != 0x12 || icmp[5] != 0x34 {
+        return false;
+    }
+
+    true
 }

@@ -127,13 +127,15 @@ impl RttSequence {
     fn std_deviation(&self) -> Duration {
         let avg = self.mean();
 
-        let variance = self.0
+        let variance = self
+            .0
             .iter()
             .map(|value| {
                 let diff = avg.as_nanos().abs_diff((*value).as_nanos());
                 diff * diff
             })
-            .sum::<u128>() as f64 / self.0.len() as f64;
+            .sum::<u128>() as f64
+            / self.0.len() as f64;
 
         Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.)
     }

@@ -1,6 +1,6 @@
-use std::time::{Duration, Instant};
-
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tokio::{sync::mpsc, time};
 
 #[derive(Clone, Debug)]
@@ -34,8 +34,13 @@ pub(crate) async fn generator(
     to_tx_transport: mpsc::Sender<PingReqResp>,
     mut send_mode: SendMode,
     ping_number: Option<u64>,
+    run_time: Option<Duration>,
 ) {
     let mut i: u64 = 0;
+    let run_time = run_time
+        .map(|run_tune| sleep(run_tune))
+        .unwrap_or(sleep(Duration::from_secs(u64::MAX)));
+    tokio::pin!(run_time);
     loop {
         if let Some(n) = ping_number {
             if i >= n {
@@ -61,6 +66,9 @@ pub(crate) async fn generator(
                             panic!("generator: cannot receive from transport");
                         }
                     }
+                    _ = &mut run_time => {
+                        return;
+                    }
                     _ = tokio::signal::ctrl_c() => {
                         return;
                     }
@@ -69,11 +77,13 @@ pub(crate) async fn generator(
             SendMode::Interval(interval) => {
                 tokio::select! {
                     _ = time::sleep(Duration::from_millis(*interval)) => {},
+                    _ = &mut run_time => {
+                        return;
+                    }
                     _ = tokio::signal::ctrl_c() => {
                         return;
                     }
                 }
-
             }
         }
         i += 1;

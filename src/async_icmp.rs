@@ -1,4 +1,7 @@
-use std::{net::{Ipv4Addr, SocketAddr}, time::Instant};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::Instant,
+};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -16,12 +19,17 @@ pub(crate) async fn pinger_transport(
     request_size: Option<u16>,
     response_size: Option<u16>,
 ) {
-    let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).expect("should be able to create socket");
-    sock.set_nonblocking(true).expect("should be able to set nonblocking for socket");
-    let sock = tokio::net::UdpSocket::from_std(sock.into()).expect("should be able to create async socket from fd");
+    let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
+        .expect("should be able to create socket");
+    sock.set_nonblocking(true)
+        .expect("should be able to set nonblocking for socket");
+    let sock = tokio::net::UdpSocket::from_std(sock.into())
+        .expect("should be able to create async socket from fd");
 
     remote_address.set_port(0);
-    sock.connect(remote_address).await.expect("pinger: should be able to connect socket");
+    sock.connect(remote_address)
+        .await
+        .expect("pinger: should be able to connect socket");
 
     let mut buf = [0; u16::MAX as usize];
 
@@ -107,7 +115,7 @@ fn csum16_add(x: u16, y: u16) -> u16 {
 }
 
 fn csum16_slice(data: &[u8]) -> u16 {
-    assert!(data.len() %2 == 0);
+    assert!(data.len() % 2 == 0);
 
     let mut csum = 0;
     for chunk in data.chunks_exact(2) {

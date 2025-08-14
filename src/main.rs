@@ -4,15 +4,15 @@ use std::time::Duration;
 use tokio::runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use pinger::{PingReqResp, SendMode};
 use crate::cli::CliParams::{PingerParams, ServerParams};
+use pinger::{PingReqResp, SendMode};
 
 mod async_icmp;
 mod async_tcp;
 mod async_udp;
+mod cli;
 mod pinger;
 mod statistics;
-mod cli;
 
 fn main() -> Result<(), io::Error> {
     let channel_cap: usize = 32;
@@ -68,9 +68,12 @@ fn main() -> Result<(), io::Error> {
                 _ => unreachable!(),
             };
 
-            let generator = rt.spawn(
-                pinger::generator(gen_txtr_send, send_mode, params.ping_number)
-            );
+            let generator = rt.spawn(pinger::generator(
+                gen_txtr_send,
+                send_mode,
+                params.ping_number,
+                params.run_time,
+            ));
             let statista = rt.spawn(statistics::statista(
                 txtr_stat_recv,
                 txtr_gen,

@@ -1,6 +1,6 @@
-use std::net::SocketAddr;
-
 use clap::{Arg, ArgAction, Command};
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::pinger::PING_HDR_LEN;
 
@@ -73,6 +73,14 @@ fn cli() -> Command {
                         .help("Amount of ping packets to send")
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u64).range(1..)),
+                )
+                .arg(
+                    Arg::new("run-time")
+                        .long("run-time")
+                        .short('t')
+                        .help("Amount of time to send packets")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u64).range(1..)),
                 ),
         )
         .subcommand(
@@ -112,6 +120,7 @@ pub(crate) struct PingerParams {
     pub response_size: Option<u16>,
     pub ping_number: Option<u64>,
     pub protocol: String,
+    pub run_time: Option<Duration>,
 }
 
 pub(crate) enum CliParams {
@@ -125,26 +134,24 @@ pub(crate) fn get_cli_params() -> CliParams {
     let protocol = matches.get_one::<String>("protocol").unwrap();
 
     match matches.subcommand() {
-        Some(("client", submatch)) => {
-            CliParams::PingerParams(PingerParams {
-                remote_address: *submatch.get_one::<SocketAddr>("remote-address").unwrap(),
-                local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
-                interval: *submatch.get_one::<u64>("interval").unwrap(),
-                adaptive: *submatch.get_one::<bool>("adaptive-interval").unwrap(),
-                wait_time: *submatch.get_one::<u64>("wait-time").unwrap(),
-                request_size: submatch.get_one::<u16>("req-size").copied(),
-                response_size: submatch.get_one::<u16>("resp-size").copied(),
-                ping_number: submatch.get_one::<u64>("ping-number").copied(),
-                protocol: protocol.clone(),
-            })
-        }
-        Some(("server", submatch)) => {
-            CliParams::ServerParams(ServerParams{
-                local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
-                protocol: protocol.clone(),
-            })
-
-        }
+        Some(("client", submatch)) => CliParams::PingerParams(PingerParams {
+            remote_address: *submatch.get_one::<SocketAddr>("remote-address").unwrap(),
+            local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
+            interval: *submatch.get_one::<u64>("interval").unwrap(),
+            adaptive: *submatch.get_one::<bool>("adaptive-interval").unwrap(),
+            wait_time: *submatch.get_one::<u64>("wait-time").unwrap(),
+            request_size: submatch.get_one::<u16>("req-size").copied(),
+            response_size: submatch.get_one::<u16>("resp-size").copied(),
+            ping_number: submatch.get_one::<u64>("ping-number").copied(),
+            protocol: protocol.clone(),
+            run_time: submatch
+                .get_one::<u64>("run-time")
+                .map(|d| Duration::from_secs(*d)),
+        }),
+        Some(("server", submatch)) => CliParams::ServerParams(ServerParams {
+            local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
+            protocol: protocol.clone(),
+        }),
         _ => unreachable!(),
     }
 }

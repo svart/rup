@@ -1,4 +1,3 @@
-use std::io;
 use std::time::Duration;
 
 use tokio::runtime;
@@ -18,18 +17,18 @@ use transport::async_udp::UdpClientTransport;
 use transport::{transmitter, receiver};
 use pinger::Request;
 
-fn main() -> Result<(), io::Error> {
-    let channel_cap: usize = 32;
-
+fn main() {
     let cli_params = cli::get_cli_params();
 
     let rt = runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build()?;
+        .build()
+        .expect("failed to build runtime");
 
     match cli_params {
         PingerParams(params) => {
+            let channel_cap = 1024;
             let (gen_txtr_send, gen_txtr_recv): (Sender<Request>, Receiver<Request>) =
                 mpsc::channel(channel_cap);
             let (txtr_stat_send, txtr_stat_recv): (Sender<StatEntry>, Receiver<StatEntry>) =
@@ -45,48 +44,98 @@ fn main() -> Result<(), io::Error> {
             };
 
             rt.block_on(async {
+                let remote_addr = match tokio::net::lookup_host(&params.remote_address).await {
+                    Ok(mut addrs) => match addrs.next() {
+                        Some(a) => a,
+                        None => {
+                            eprintln!("no addresses found for {}", params.remote_address);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("failed to resolve {}: {}", params.remote_address, e);
+                        return;
+                    }
+                };
+
                 let (mut tx_handle, mut rx_handle) = match params.protocol.as_str() {
                     "udp" => {
-                        let transport =
-                            UdpClientTransport::new(params.local_address, params.remote_address)
-                                .await;
+                        let transport = match UdpClientTransport::new(
+                            params.local_address,
+                            remote_addr,
+                        )
+                        .await
+                        {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!("UDP transport failed: {e}");
+                                return;
+                            }
+                        };
                         let t2 = transport.clone();
-                        let tx = tokio::spawn(transmitter(t2, gen_txtr_recv, txtr_stat_send.clone()));
+                        let tx = tokio::spawn(transmitter(
+                            t2,
+                            gen_txtr_recv,
+                            txtr_stat_send.clone(),
+                        ));
                         let rx = tokio::spawn(receiver(transport, txtr_stat_send));
                         (tx, rx)
                     }
                     "tcp" => {
-                        let sock = tokio::net::TcpSocket::new_v4().unwrap();
-                        sock.bind(params.local_address).expect("TCP: bind failed");
-                        let stream = sock
-                            .connect(params.remote_address)
-                            .await
-                            .expect("TCP: connect failed");
+                        let sock = match tokio::net::TcpSocket::new_v4() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("TCP socket creation failed: {e}");
+                                return;
+                            }
+                        };
+                        if let Err(e) = sock.bind(params.local_address) {
+                            eprintln!("TCP bind failed: {e}");
+                            return;
+                        }
+                        let stream = match sock.connect(remote_addr).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("TCP connect failed: {e}");
+                                return;
+                            }
+                        };
                         let transport = TcpClientTransport::new(stream);
+                        let t2 = transport.clone();
                         let tx = tokio::spawn(transmitter(
-                            transport.clone(),
-                            gen_txtr_recv,
-                            txtr_stat_send.clone(),
-                        ));
-                        let rx =
-                            tokio::spawn(receiver(transport, txtr_stat_send));
-                        (tx, rx)
-                    }
-                    "icmp" => {
-                        let transport = IcmpClientTransport::new(
-                            params.local_address,
-                            params.remote_address,
-                        )
-                        .await;
-                        let tx = tokio::spawn(transmitter(
-                            transport.clone(),
+                            t2,
                             gen_txtr_recv,
                             txtr_stat_send.clone(),
                         ));
                         let rx = tokio::spawn(receiver(transport, txtr_stat_send));
                         (tx, rx)
                     }
-                    _ => unreachable!(),
+                    "icmp" => {
+                        let transport = match IcmpClientTransport::new(
+                            params.local_address,
+                            remote_addr,
+                        )
+                        .await
+                        {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!("ICMP transport failed: {e}");
+                                return;
+                            }
+                        };
+                        let t2 = transport.clone();
+                        let tx = tokio::spawn(transmitter(
+                            t2,
+                            gen_txtr_recv,
+                            txtr_stat_send.clone(),
+                        ));
+                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
+                        (tx, rx)
+                    }
+                    _ => {
+                        eprintln!("unknown protocol: {}", params.protocol);
+                        return;
+                    }
                 };
 
                 let generator = tokio::spawn(pinger::generator(
@@ -112,23 +161,31 @@ fn main() -> Result<(), io::Error> {
 
                 drop(tx_handle);
                 drop(rx_handle);
-                generator.await.unwrap();
-                statista.await.unwrap();
+                let _ = generator.await;
+                let _ = statista.await;
             });
         }
         ServerParams(params) => {
-            let server = match params.protocol.as_str() {
-                "tcp" => rt.spawn(transport::async_tcp::server_transport(params.local_address)),
-                "udp" => rt.spawn(transport::async_udp::server_transport(params.local_address)),
-                "icmp" => panic!("there is no server for icmp"),
-                _ => unreachable!(),
-            };
-
             rt.block_on(async {
-                server.await.unwrap();
+                let server = match params.protocol.as_str() {
+                    "tcp" => tokio::spawn(transport::async_tcp::server_transport(
+                        params.local_address,
+                    )),
+                    "udp" => tokio::spawn(transport::async_udp::server_transport(
+                        params.local_address,
+                    )),
+                    "icmp" => {
+                        eprintln!("there is no server for ICMP");
+                        return;
+                    }
+                    _ => {
+                        eprintln!("unknown protocol: {}", params.protocol);
+                        return;
+                    }
+                };
+
+                let _ = server.await;
             });
         }
     }
-
-    Ok(())
 }

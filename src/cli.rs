@@ -12,10 +12,9 @@ fn cli() -> Command {
                 .about("Send requests to the remote side and measure RTT")
                 .arg(
                     Arg::new("remote-address")
-                        .help("Were to send echo requests")
+                        .help("Where to send echo requests (host:port)")
                         .action(ArgAction::Set)
-                        .required(true)
-                        .value_parser(clap::value_parser!(SocketAddr)),
+                        .required(true),
                 )
                 .arg(
                     Arg::new("local-address")
@@ -39,7 +38,7 @@ fn cli() -> Command {
                     Arg::new("adaptive-interval")
                         .long("adaptive-interval")
                         .short('A')
-                        .help("Generate new request just after reception of responce")
+                        .help("Generate new request just after reception of response")
                         .action(ArgAction::SetTrue)
                         .conflicts_with("interval"),
                 )
@@ -47,7 +46,7 @@ fn cli() -> Command {
                     Arg::new("wait-time")
                         .long("wait-time")
                         .short('W')
-                        .help("Time to wait for responce im ms")
+                        .help("Time to wait for response in ms")
                         .action(ArgAction::Set)
                         .value_parser(clap::value_parser!(u64).range(1..))
                         .default_value("1000"),
@@ -111,7 +110,7 @@ pub(crate) struct ServerParams {
 }
 
 pub(crate) struct PingerParams {
-    pub remote_address: SocketAddr,
+    pub remote_address: String,
     pub local_address: SocketAddr,
     pub interval: u64,
     pub adaptive: bool,
@@ -131,11 +130,11 @@ pub(crate) enum CliParams {
 pub(crate) fn get_cli_params() -> CliParams {
     let matches = cli().get_matches();
 
-    let protocol = matches.get_one::<String>("protocol").unwrap();
+    let protocol = matches.get_one::<String>("protocol").unwrap().clone();
 
     match matches.subcommand() {
         Some(("client", submatch)) => CliParams::PingerParams(PingerParams {
-            remote_address: *submatch.get_one::<SocketAddr>("remote-address").unwrap(),
+            remote_address: submatch.get_one::<String>("remote-address").unwrap().clone(),
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
             interval: *submatch.get_one::<u64>("interval").unwrap(),
             adaptive: *submatch.get_one::<bool>("adaptive-interval").unwrap(),
@@ -143,14 +142,14 @@ pub(crate) fn get_cli_params() -> CliParams {
             request_size: submatch.get_one::<u16>("req-size").copied(),
             response_size: submatch.get_one::<u16>("resp-size").copied(),
             ping_number: submatch.get_one::<u64>("ping-number").copied(),
-            protocol: protocol.clone(),
+            protocol,
             run_time: submatch
                 .get_one::<u64>("run-time")
                 .map(|d| Duration::from_secs(*d)),
         }),
         Some(("server", submatch)) => CliParams::ServerParams(ServerParams {
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
-            protocol: protocol.clone(),
+            protocol,
         }),
         _ => unreachable!(),
     }

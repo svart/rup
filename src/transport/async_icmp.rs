@@ -1,8 +1,7 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Instant,
-};
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Instant;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -14,51 +13,73 @@ const IP_HEADER_LEN: usize = 20;
 const ICMP_HEADER_LEN: usize = 8;
 const DATA_OFFSET: usize = IP_HEADER_LEN + ICMP_HEADER_LEN;
 
+fn icmp_identifier() -> u16 {
+    (std::process::id() & 0xffff) as u16
+}
+
 #[derive(Clone)]
 pub(crate) struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
     remote_address: SocketAddr,
+    identifier: u16,
 }
 
 impl IcmpClientTransport {
-    pub(crate) async fn new(local: SocketAddr, mut remote: SocketAddr) -> Self {
-        let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-            .expect("should be able to create socket");
+    pub(crate) async fn new(local: SocketAddr, mut remote: SocketAddr) -> io::Result<Self> {
+        let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "ICMP socket creation failed (root or CAP_NET_RAW required): {e}"
+                ),
+            )
+        })?;
+
         sock.bind(&local.into())
-            .expect("should be able to bind to local address");
+            .map_err(|e| io::Error::new(e.kind(), format!("bind failed: {e}")))?;
+
         sock.set_nonblocking(true)
-            .expect("should be able to set nonblocking for socket");
-        let sock = UdpSocket::from_std(sock.into())
-            .expect("should be able to create async socket from fd");
+            .map_err(|e| io::Error::new(e.kind(), format!("set nonblocking failed: {e}")))?;
+
+        let sock = UdpSocket::from_std(sock.into()).map_err(|e| {
+            io::Error::new(e.kind(), format!("create async socket: {e}"))
+        })?;
 
         remote.set_port(0);
         sock.connect(remote)
             .await
-            .expect("pinger: should be able to connect socket");
+            .map_err(|e| io::Error::new(e.kind(), format!("connect failed: {e}")))?;
 
-        IcmpClientTransport {
+        Ok(IcmpClientTransport {
             sock: Arc::new(sock),
             remote_address: remote,
-        }
+            identifier: icmp_identifier(),
+        })
     }
 }
 
 impl Transport for IcmpClientTransport {
-    async fn send(self: &Self, req: &Request) -> Instant {
+    async fn send(self: &Self, req: &Request) -> io::Result<Instant> {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
             resp_size: req.response_size.unwrap_or(PING_HDR_LEN as u16),
         };
 
+        let ident_bytes = self.identifier.to_be_bytes();
+        let seq_bytes = (req.id as u16).to_be_bytes();
+
         let mut packet = vec![
             0x08, 0x00,
             0x00, 0x00,
-            0x12, 0x34,
-            (req.id >> 8) as u8, (req.id & 0xff) as u8,
+            ident_bytes[0], ident_bytes[1],
+            seq_bytes[0], seq_bytes[1],
         ];
 
-        let payload = bincode::serialize(&r).unwrap();
+        let payload = bincode::serialize(&r).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
+        })?;
+
         let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
         packet.extend_from_slice(&payload);
         packet.resize(ICMP_HEADER_LEN + data_len, 0);
@@ -68,38 +89,45 @@ impl Transport for IcmpClientTransport {
         packet[3] = (checksum & 0xff) as u8;
 
         let timestamp = Instant::now();
-        self.sock.send(&packet).await.expect("ICMP tx: failed to send");
-        timestamp
+        self.sock.send(&packet).await.map_err(|e| {
+            io::Error::new(e.kind(), format!("ICMP send failed: {e}"))
+        })?;
+
+        Ok(timestamp)
     }
 
-    async fn recv(self: &Self) -> Response {
-        let mut buf = [0; u16::MAX as usize];
+    async fn recv(self: &Self) -> io::Result<Response> {
+        let mut buf = vec![0; u16::MAX as usize];
+        let ident_bytes = self.identifier.to_be_bytes();
 
         loop {
-            let n = self.sock.recv(&mut buf).await.expect("ICMP rx: failed to recv");
+            let n = self.sock.recv(&mut buf).await.map_err(|e| {
+                io::Error::new(e.kind(), format!("ICMP recv failed: {e}"))
+            })?;
 
             if n < DATA_OFFSET + PING_HDR_LEN {
                 continue;
             }
 
-            if packet_is_good(&buf, &self.remote_address) {
-                let echo: Echo = bincode::deserialize(
-                    &buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN],
-                )
-                .unwrap();
-
-                return Response {
-                    id: echo.id,
-                    timestamp: Instant::now(),
-                };
+            if !packet_is_good(&buf, &self.remote_address, ident_bytes) {
+                continue;
             }
+
+            let echo: Echo = bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN])
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("deserialize: {e}"))
+                })?;
+
+            return Ok(Response {
+                id: echo.id,
+                timestamp: Instant::now(),
+            });
         }
     }
 }
 
 fn csum16_add(x: u16, y: u16) -> u16 {
     let s = (x as u32) + (y as u32);
-
     if s & 0x1_00_00 > 0 {
         (s + 1) as u16
     } else {
@@ -108,19 +136,79 @@ fn csum16_add(x: u16, y: u16) -> u16 {
 }
 
 fn csum16_slice(data: &[u8]) -> u16 {
-    assert!(data.len() % 2 == 0);
-
     let mut csum = 0;
-    for chunk in data.chunks_exact(2) {
-        let hi = chunk[0] as u16;
-        let lo = chunk[1] as u16;
-        csum = csum16_add(csum, (hi << 8) | lo);
+    for chunk in data.chunks(2) {
+        if chunk.len() == 2 {
+            let hi = chunk[0] as u16;
+            let lo = chunk[1] as u16;
+            csum = csum16_add(csum, (hi << 8) | lo);
+        } else {
+            csum = csum16_add(csum, (chunk[0] as u16) << 8);
+        }
     }
-
     !csum
 }
 
-fn packet_is_good(buf: &[u8], remote_address: &SocketAddr) -> bool {
+fn csum16_validate(data: &[u8]) -> bool {
+    if data.len() % 2 != 0 {
+        return false;
+    }
+    let mut csum = 0;
+    for chunk in data.chunks(2) {
+        if chunk.len() == 2 {
+            let hi = chunk[0] as u16;
+            let lo = chunk[1] as u16;
+            csum = csum16_add(csum, (hi << 8) | lo);
+        } else {
+            csum = csum16_add(csum, (chunk[0] as u16) << 8);
+        }
+    }
+    csum == 0xffff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csum16_slice_even() {
+        let data = [0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01];
+        let csum = csum16_slice(&data);
+        let got = !csum;
+        let expected: u16 = 0x0800u16.wrapping_add(0x0000u16)
+            .wrapping_add(0x1234u16)
+            .wrapping_add(0x0001u16);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn csum16_full_checksum_is_correct() {
+        let data = [0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01];
+        let csum = csum16_slice(&data);
+        let mut with_csum = data;
+        with_csum[2] = (csum >> 8) as u8;
+        with_csum[3] = (csum & 0xff) as u8;
+        assert!(csum16_validate(&with_csum));
+    }
+
+    #[test]
+    fn csum16_odd_length() {
+        let data = [0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00];
+        let _csum = csum16_slice(&data);
+    }
+
+    #[test]
+    fn icmp_identifier_is_process_id_based() {
+        let id = icmp_identifier();
+        assert_eq!(id, (std::process::id() & 0xffff) as u16);
+    }
+}
+
+fn packet_is_good(buf: &[u8], remote_address: &SocketAddr, identifier: [u8; 2]) -> bool {
+    if buf.len() < IP_HEADER_LEN + ICMP_HEADER_LEN {
+        return false;
+    }
+
     let ip = &buf[..IP_HEADER_LEN];
     let ip_addr = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
     if remote_address.ip() != ip_addr {
@@ -131,7 +219,11 @@ fn packet_is_good(buf: &[u8], remote_address: &SocketAddr) -> bool {
     if icmp[0] != 0x00 || icmp[1] != 0x00 {
         return false;
     }
-    if icmp[4] != 0x12 || icmp[5] != 0x34 {
+    if icmp[4] != identifier[0] || icmp[5] != identifier[1] {
+        return false;
+    }
+
+    if !csum16_validate(icmp) {
         return false;
     }
 

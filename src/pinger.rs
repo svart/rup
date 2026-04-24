@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use tokio::{sync::mpsc, time};
+use tokio::sync::mpsc;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Request {
@@ -22,7 +22,7 @@ pub(crate) struct Entry {
 
 pub(crate) enum StatEntry {
     Open(Entry),
-    Close(Entry)
+    Close(Entry),
 }
 
 pub(crate) enum SendMode {
@@ -37,7 +37,6 @@ pub(crate) struct Echo {
     pub resp_size: u16,
 }
 
-// sum of fields in Echo struct
 pub const PING_HDR_LEN: usize = 0
     + std::mem::size_of::<u64>()
     + std::mem::size_of::<u16>()
@@ -71,16 +70,17 @@ pub(crate) async fn generator(
             response_size,
         };
 
-        if let Err(err) = to_tx_transport.send(req).await {
-            panic!("generator: Error during sending {id} to transport: {err}");
+        if to_tx_transport.send(req).await.is_err() {
+            break;
         }
 
         match send_mode {
             SendMode::Adaptive(ref mut channel) => {
+                let wait_for_response = channel.recv();
                 tokio::select! {
-                    r_val = channel.recv() => {
+                    r_val = wait_for_response => {
                         if r_val.is_none() {
-                            panic!("generator: cannot receive from transport");
+                            break;
                         }
                     }
                     _ = &mut run_time => {
@@ -93,7 +93,7 @@ pub(crate) async fn generator(
             }
             SendMode::Interval(interval) => {
                 tokio::select! {
-                    _ = time::sleep(Duration::from_millis(interval)) => {},
+                    _ = sleep(Duration::from_millis(interval)) => {},
                     _ = &mut run_time => {
                         return;
                     }
@@ -104,5 +104,50 @@ pub(crate) async fn generator(
             }
         }
         id += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_hdr_len_correct() {
+        assert_eq!(PING_HDR_LEN, 12);
+    }
+
+    #[test]
+    fn echo_serialization_roundtrip() {
+        let echo = Echo {
+            id: 42,
+            len: 100,
+            resp_size: 64,
+        };
+        let bytes = bincode::serialize(&echo).unwrap();
+        let decoded: Echo = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.id, 42);
+        assert_eq!(decoded.len, 100);
+        assert_eq!(decoded.resp_size, 64);
+        assert_eq!(bytes.len(), PING_HDR_LEN);
+    }
+
+    #[test]
+    fn request_roundtrip_through_channel() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            tx.send(Request {
+                id: 7,
+                request_size: Some(64),
+                response_size: Some(32),
+            })
+            .await
+            .unwrap();
+            let req = rx.recv().await.unwrap();
+            assert_eq!(req.id, 7);
+            assert_eq!(req.request_size, Some(64));
+        });
     }
 }

@@ -45,7 +45,7 @@ fn main() -> Result<(), io::Error> {
             };
 
             rt.block_on(async {
-                let (tx_handle, rx_handle) = match params.protocol.as_str() {
+                let (mut tx_handle, mut rx_handle) = match params.protocol.as_str() {
                     "udp" => {
                         let transport =
                             UdpClientTransport::new(params.local_address, params.remote_address)
@@ -103,8 +103,15 @@ fn main() -> Result<(), io::Error> {
                     Duration::from_millis(params.wait_time),
                 ));
 
-                tx_handle.await.unwrap();
-                rx_handle.await.unwrap();
+                tokio::select! {
+                    _ = &mut tx_handle => {
+                        rx_handle.abort();
+                    }
+                    _ = &mut rx_handle => {}
+                }
+
+                drop(tx_handle);
+                drop(rx_handle);
                 generator.await.unwrap();
                 statista.await.unwrap();
             });

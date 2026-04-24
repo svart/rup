@@ -1,11 +1,13 @@
+use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::mpsc;
+use tokio::net::{TcpListener, TcpStream};
 
-use crate::pinger::{Echo, MsgType, PingReqResp, PING_HDR_LEN};
+use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
+use crate::transport::Transport;
 
 async fn server_connection_handler(mut sock: TcpStream) {
     let peer_addr = sock.peer_addr().unwrap();
@@ -84,81 +86,78 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     }
 }
 
-pub(crate) async fn pinger_transport(
-    mut from_generator: mpsc::Receiver<PingReqResp>,
-    to_statista: mpsc::Sender<PingReqResp>,
-    local_address: SocketAddr,
-    remote_address: SocketAddr,
-    request_size: Option<u16>,
-    response_size: Option<u16>,
-) {
-    let sock = TcpSocket::new_v4().unwrap();
-    sock.bind(local_address).expect("pinger: bind failed");
-    let mut sock = sock
-        .connect(remote_address)
-        .await
-        .expect("pinger: connection failed");
+#[derive(Clone)]
+pub(crate) struct TcpClientTransport {
+    stream: Arc<TcpStream>,
+}
 
-    let mut buf = [0; PING_HDR_LEN];
+impl TcpClientTransport {
+    pub(crate) fn new(stream: TcpStream) -> Self {
+        TcpClientTransport { stream: Arc::new(stream) }
+    }
+}
 
-    loop {
-        tokio::select! {
-            r_val = from_generator.recv() => {
-                match r_val {
-                    Some(mut req) => {
-                        // Sending request to socket
-                        let index = req.index;
-                        req.timestamp = Instant::now();
+impl Transport for TcpClientTransport {
+    async fn send(self: &Self, req: &Request) -> Instant {
+        let r = Echo {
+            id: req.id,
+            len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
+            resp_size: req.response_size.unwrap_or(PING_HDR_LEN as u16),
+        };
 
-                        let r = Echo {
-                            id: index,
-                            len: request_size.unwrap_or(PING_HDR_LEN as u16),
-                            resp_size: response_size.unwrap_or(PING_HDR_LEN as u16),
-                        };
+        let mut send_buf = bincode::serialize(&r).unwrap();
 
-                        let mut send_buf = bincode::serialize(&r).unwrap();
+        if let Some(size) = req.request_size {
+            send_buf.resize(size as usize, 0);
+        }
 
-                        if let Some(size) = request_size {
-                            send_buf.resize(size as usize, 0);
-                        }
+        let mut offset = 0;
+        while offset < send_buf.len() {
+            self.stream.writable().await.unwrap();
+            match self.stream.try_write(&send_buf[offset..]) {
+                Ok(n) => offset += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("TCP tx: failed to send message: {e}"),
+            }
+        }
 
-                        sock.write_all(&send_buf).await.expect("tx: couldn't send message");
+        Instant::now()
+    }
 
-                        to_statista.send(req).await.expect("tx: couldn't send transformed request to client");
-                    }
-                    None => break,
+    async fn recv(self: &Self) -> Response {
+        let mut hdr = [0; PING_HDR_LEN];
+        let mut offset = 0;
+        while offset < PING_HDR_LEN {
+            self.stream.readable().await.unwrap();
+            match self.stream.try_read(&mut hdr[offset..]) {
+                Ok(0) => panic!("TCP rx: connection closed"),
+                Ok(n) => offset += n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("TCP rx: failed to read header: {e}"),
+            }
+        }
+
+        let echo: Echo = bincode::deserialize(&hdr).unwrap();
+
+        if echo.len as usize > PING_HDR_LEN {
+            let remaining = echo.len as usize - PING_HDR_LEN;
+            let mut extra = vec![0; remaining];
+            let mut offset = 0;
+            while offset < remaining {
+                self.stream.readable().await.unwrap();
+                match self.stream.try_read(&mut extra[offset..]) {
+                    Ok(0) => panic!("TCP rx: connection closed reading payload"),
+                    Ok(n) => offset += n,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(e) => panic!("TCP rx: failed to read payload: {e}"),
                 }
             }
-            r_val = sock.read(&mut buf) => {
-                if r_val.is_err() {
-                    break;
-                }
+        }
 
-                let p_resp: Echo = bincode::deserialize(&buf).unwrap();
-
-                let req = PingReqResp {
-                    index: p_resp.id,
-                    timestamp: Instant::now(),
-                    t: MsgType::Response
-                };
-
-                if p_resp.len as usize > PING_HDR_LEN {
-                    let mut for_read_buf = vec![0; p_resp.len as usize - PING_HDR_LEN];
-
-                    match sock.read(&mut for_read_buf).await {
-                        Ok(0) => {
-                            panic!("Connection closed: {remote_address}");
-                        }
-                        Ok(_) => { }
-                        Err(_) => {
-                            panic!("An error occurred during reading response,\
-                                    terminating connection with {remote_address}");
-                        }
-                    }
-                }
-
-                to_statista.send(req).await.unwrap();
-            }
+        Response {
+            id: echo.id,
+            timestamp: Instant::now(),
+            size: echo.len as usize,
         }
     }
 }

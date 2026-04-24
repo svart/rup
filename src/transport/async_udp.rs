@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::net::UdpSocket;
@@ -38,20 +39,24 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct UdpClientTransport {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
 }
 
 impl UdpClientTransport {
     pub(crate) async fn new(local: SocketAddr, remote: SocketAddr) -> Self {
-        let socket = UdpSocket::bind(local)
-            .await
-            .expect("pinger: binding failed");
-        socket.connect(remote)
+        let socket = Arc::new(
+            UdpSocket::bind(local)
+                .await
+                .expect("pinger: binding failed"),
+        );
+        socket
+            .connect(remote)
             .await
             .expect("pinger: connect function failed");
 
-        UdpClientTransport{socket}
+        UdpClientTransport { socket }
     }
 }
 

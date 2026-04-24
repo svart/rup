@@ -12,8 +12,9 @@ mod cli;
 mod pinger;
 mod statistics;
 
+use transport::async_tcp::TcpClientTransport;
 use transport::async_udp::UdpClientTransport;
-use transport::transmitter;
+use transport::{transmitter, receiver};
 use pinger::Request;
 
 fn main() -> Result<(), io::Error> {
@@ -43,28 +44,35 @@ fn main() -> Result<(), io::Error> {
             };
 
             rt.block_on(async {
-                let transport = match params.protocol.as_str() {
-                    // "tcp" => tokio::spawn(async_tcp::pinger_transport(
-                    //     gen_txtr_recv,
-                    //     txtr_stat_send,
-                    //     params.local_address,
-                    //     params.remote_address,
-                    //     params.request_size,
-                    //     params.response_size,
-                    // )),
-                    "udp" => UdpClientTransport::new(params.local_address, params.remote_address).await,
-                    // "icmp" => tokio::spawn(async_icmp::pinger_transport(
-                    //     gen_txtr_recv,
-                    //     txtr_stat_send,
-                    //     params.local_address,
-                    //     params.remote_address,
-                    //     params.request_size,
-                    //     params.response_size,
-                    // )),
+                let (tx_handle, rx_handle) = match params.protocol.as_str() {
+                    "udp" => {
+                        let transport =
+                            UdpClientTransport::new(params.local_address, params.remote_address)
+                                .await;
+                        let t2 = transport.clone();
+                        let tx = tokio::spawn(transmitter(t2, gen_txtr_recv, txtr_stat_send.clone()));
+                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
+                        (tx, rx)
+                    }
+                    "tcp" => {
+                        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+                        sock.bind(params.local_address).expect("TCP: bind failed");
+                        let stream = sock
+                            .connect(params.remote_address)
+                            .await
+                            .expect("TCP: connect failed");
+                        let transport = TcpClientTransport::new(stream);
+                        let tx = tokio::spawn(transmitter(
+                            transport.clone(),
+                            gen_txtr_recv,
+                            txtr_stat_send.clone(),
+                        ));
+                        let rx =
+                            tokio::spawn(receiver(transport, txtr_stat_send));
+                        (tx, rx)
+                    }
                     _ => unreachable!(),
                 };
-
-                let transmitter = tokio::spawn(transmitter(transport, gen_txtr_recv, txtr_stat_send));
 
                 let generator = tokio::spawn(pinger::generator(
                     gen_txtr_send,
@@ -80,7 +88,8 @@ fn main() -> Result<(), io::Error> {
                     Duration::from_millis(params.wait_time),
                 ));
 
-                transmitter.await.unwrap();
+                tx_handle.await.unwrap();
+                rx_handle.await.unwrap();
                 generator.await.unwrap();
                 statista.await.unwrap();
             });

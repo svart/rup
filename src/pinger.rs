@@ -38,19 +38,6 @@ pub(crate) struct Echo {
     pub resp_size: u16,
 }
 
-// TODO: remove after TCP and ICMP are migrated to Transport trait
-pub(crate) enum MsgType {
-    Request,
-    Response,
-}
-
-// TODO: remove after TCP and ICMP are migrated to Transport trait
-pub(crate) struct PingReqResp {
-    pub(crate) index: u64,
-    pub(crate) timestamp: Instant,
-    pub(crate) t: MsgType,
-}
-
 // sum of fields in Echo struct
 pub const PING_HDR_LEN: usize = 0
     + std::mem::size_of::<u64>()

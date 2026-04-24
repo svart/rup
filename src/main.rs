@@ -12,6 +12,7 @@ mod cli;
 mod pinger;
 mod statistics;
 
+use transport::async_icmp::IcmpClientTransport;
 use transport::async_tcp::TcpClientTransport;
 use transport::async_udp::UdpClientTransport;
 use transport::{transmitter, receiver};
@@ -69,6 +70,20 @@ fn main() -> Result<(), io::Error> {
                         ));
                         let rx =
                             tokio::spawn(receiver(transport, txtr_stat_send));
+                        (tx, rx)
+                    }
+                    "icmp" => {
+                        let transport = IcmpClientTransport::new(
+                            params.local_address,
+                            params.remote_address,
+                        )
+                        .await;
+                        let tx = tokio::spawn(transmitter(
+                            transport.clone(),
+                            gen_txtr_recv,
+                            txtr_stat_send.clone(),
+                        ));
+                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
                         (tx, rx)
                     }
                     _ => unreachable!(),

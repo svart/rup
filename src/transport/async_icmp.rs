@@ -1,151 +1,101 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    time::Instant,
     sync::Arc,
+    time::Instant,
 };
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::oneshot;
 
-use crate::pinger::{Echo, MsgType, PingReqResp, PING_HDR_LEN};
+use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
+use crate::transport::Transport;
 
 const IP_HEADER_LEN: usize = 20;
 const ICMP_HEADER_LEN: usize = 8;
+const DATA_OFFSET: usize = IP_HEADER_LEN + ICMP_HEADER_LEN;
 
+#[derive(Clone)]
+pub(crate) struct IcmpClientTransport {
+    sock: Arc<UdpSocket>,
+    remote_address: SocketAddr,
+}
 
-// TODO
-// Transport API:
-// - from generator (Receiver<PingReqResp>)
-// - to statista (Sender<PingReqResp>)
-// - stopper (broadcast)
+impl IcmpClientTransport {
+    pub(crate) async fn new(local: SocketAddr, mut remote: SocketAddr) -> Self {
+        let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
+            .expect("should be able to create socket");
+        sock.bind(&local.into())
+            .expect("should be able to bind to local address");
+        sock.set_nonblocking(true)
+            .expect("should be able to set nonblocking for socket");
+        let sock = UdpSocket::from_std(sock.into())
+            .expect("should be able to create async socket from fd");
 
-pub(crate) async fn pinger_transport(
-    from_generator: Receiver<PingReqResp>,
-    to_statista: Sender<PingReqResp>,
-    local_address: SocketAddr,
-    mut remote_address: SocketAddr,
-    request_size: Option<u16>,
-    response_size: Option<u16>,
-) {
-    let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-        .expect("should be able to create socket");
-    sock.bind(&local_address.into())
-        .expect("should be able to bind to local address");
-    sock.set_nonblocking(true)
-        .expect("should be able to set nonblocking for socket");
-    let sock = tokio::net::UdpSocket::from_std(sock.into())
-        .expect("should be able to create async socket from fd");
+        remote.set_port(0);
+        sock.connect(remote)
+            .await
+            .expect("pinger: should be able to connect socket");
 
-    remote_address.set_port(0);
-    sock.connect(remote_address)
-        .await
-        .expect("pinger: should be able to connect socket");
-
-    let sock = Arc::new(sock);
-
-    let (stopper_tx, mut stopper_rx) = tokio::sync::oneshot::channel();
-
-    let to_stat_copy = to_statista.clone();
-    let sock_copy = sock.clone();
-    tokio::spawn(sender(
-        from_generator,
-        to_stat_copy,
-        sock_copy,
-        request_size,
-        response_size,
-        stopper_tx,
-    ));
-
-    let mut buf = [0; u16::MAX as usize];
-
-    loop {
-        tokio::select! {
-            r_val = sock.recv(&mut buf) => {
-                match r_val {
-                    Ok(_) => {
-                        const DATA_OFFSET: usize = IP_HEADER_LEN + ICMP_HEADER_LEN;
-
-                        // println!("RX IP:   {:02X?}", &buf[..IP_HEADER_LEN]);
-                        // println!("RX ICMP: {:02X?}", &buf[IP_HEADER_LEN..IP_HEADER_LEN + ICMP_HEADER_LEN]);
-                        // println!("RX DATA: {:02X?}", &buf[DATA_OFFSET..]);
-
-                        if packet_is_good(&buf, &remote_address) {
-                            let p_resp: Echo = bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
-                            let req = PingReqResp {
-                                index: p_resp.id,
-                                timestamp: Instant::now(),
-                                t: MsgType::Response,
-                            };
-                            to_statista.send(req).await.expect("transport rx: should send response to stats normally");
-                        }
-                    }
-                    Err(e) => {
-                        println!("transport rx: error reading from socket: {e}");
-                        return;
-                    }
-                }
-            }
-            _ = &mut stopper_rx => {
-                println!("transport rx: got stop signal, going out");
-                return;
-            }
+        IcmpClientTransport {
+            sock: Arc::new(sock),
+            remote_address: remote,
         }
     }
 }
 
-async fn sender(
-    mut from_generator: Receiver<PingReqResp>,
-    to_statista: Sender<PingReqResp>,
-    sock: Arc<UdpSocket>,
-    request_size: Option<u16>,
-    response_size: Option<u16>,
-    stopper: oneshot::Sender<()>,
-) {
-    while let Some(mut req) = from_generator.recv().await {
-        // Sending request to socket
-        let index = req.index;
-
+impl Transport for IcmpClientTransport {
+    async fn send(self: &Self, req: &Request) -> Instant {
         let r = Echo {
-            id: index,
-            len: request_size.unwrap_or(PING_HDR_LEN as u16),
-            resp_size: response_size.unwrap_or(PING_HDR_LEN as u16),
+            id: req.id,
+            len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
+            resp_size: req.response_size.unwrap_or(PING_HDR_LEN as u16),
         };
 
-        let icmp_header = vec![
-            0x08, 0x00,   // Type, Code: Echo request
-            0x00, 0x00,   // Checksum placeholder
-            0x12, 0x34,   // Identifier
-            (index >> 8) as u8, (index & 0xff) as u8,  // Sequence number
+        let mut packet = vec![
+            0x08, 0x00,
+            0x00, 0x00,
+            0x12, 0x34,
+            (req.id >> 8) as u8, (req.id & 0xff) as u8,
         ];
 
-        let mut send_buf = bincode::serialize(&r).unwrap();
+        let payload = bincode::serialize(&r).unwrap();
+        let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
+        packet.extend_from_slice(&payload);
+        packet.resize(ICMP_HEADER_LEN + data_len, 0);
 
-        if let Some(size) = request_size {
-            send_buf.resize(size as usize + ICMP_HEADER_LEN, 0);
-        } else {
-            send_buf.resize(PING_HDR_LEN + ICMP_HEADER_LEN, 0);
-        }
-        let len = send_buf.len() - ICMP_HEADER_LEN;
-        send_buf.copy_within(0..len, ICMP_HEADER_LEN);
-        send_buf[..ICMP_HEADER_LEN].copy_from_slice(&icmp_header);
+        let checksum = csum16_slice(&packet);
+        packet[2] = (checksum >> 8) as u8;
+        packet[3] = (checksum & 0xff) as u8;
 
-        let checksum = csum16_slice(&send_buf);
-        send_buf[2] = (checksum >> 8) as u8;
-        send_buf[3] = (checksum & 0xff) as u8;
-
-        // println!("TX ICMP: {:02X?}", &send_buf[..ICMP_HEADER_LEN]);
-        // println!("TX DATA: {:02X?}", &send_buf[ICMP_HEADER_LEN..]);
-
-        req.timestamp = Instant::now();
-        sock.send(&send_buf).await.expect("tx: should send to socket normally");
-        to_statista.send(req).await.expect("tx: should send request to stats normally");
-        println!("transport: sent {index}");
+        let timestamp = Instant::now();
+        self.sock.send(&packet).await.expect("ICMP tx: failed to send");
+        timestamp
     }
 
-    println!("transport tx: all sent going out");
-    stopper.send(()).expect("transport tx: should be able to send stop signal normally");
+    async fn recv(self: &Self) -> Response {
+        let mut buf = [0; u16::MAX as usize];
+
+        loop {
+            let n = self.sock.recv(&mut buf).await.expect("ICMP rx: failed to recv");
+
+            if n < DATA_OFFSET + PING_HDR_LEN {
+                continue;
+            }
+
+            if packet_is_good(&buf, &self.remote_address) {
+                let echo: Echo = bincode::deserialize(
+                    &buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN],
+                )
+                .unwrap();
+
+                return Response {
+                    id: echo.id,
+                    timestamp: Instant::now(),
+                    size: echo.len as usize,
+                };
+            }
+        }
+    }
 }
 
 fn csum16_add(x: u16, y: u16) -> u16 {

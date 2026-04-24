@@ -91,7 +91,6 @@ impl Transport for IcmpClientTransport {
                 return Response {
                     id: echo.id,
                     timestamp: Instant::now(),
-                    size: echo.len as usize,
                 };
             }
         }

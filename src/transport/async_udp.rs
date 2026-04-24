@@ -89,7 +89,6 @@ impl Transport for UdpClientTransport {
         Response {
             id: r.id,
             timestamp: Instant::now(),
-            size: buf.len(),
         }
     }
 }

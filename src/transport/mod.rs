@@ -27,7 +27,6 @@ pub(crate) async fn transmitter(
                 to_statista.send(s).await.expect("tx: couldn't send open stat entry to statista");
             }
             None => {
-                println!("tx: generator finished");
                 break;
             }
         }
@@ -45,7 +44,6 @@ pub(crate) async fn receiver(
                 to_statista.send(s).await.expect("rx: couldn't send close stat entry to statista");
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("rx: got signal, going out");
                 return;
             }
         }

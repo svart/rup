@@ -30,7 +30,7 @@ async fn receive_timeout(
             println!("seq: {index} request timeout");
 
             if let Some(gen_channel) = &to_generator {
-                gen_channel.send(()).await.unwrap();
+                let _ = gen_channel.send(()).await;
             }
         } else {
             break;
@@ -48,11 +48,9 @@ pub(crate) async fn statista(
 
     tokio::spawn(presenter(stat_pres_recv));
 
-    // TODO: add another arm to listen on ctrl-c to exit immediately
     while let Some(resp) = from_transport.recv().await {
         match resp {
             StatEntry::Open(t) => {
-                println!("statista: got request");
                 tokio::spawn(receive_timeout(
                     t.id,
                     req_lock.clone(),
@@ -65,7 +63,6 @@ pub(crate) async fn statista(
                 requests.push_back(t);
             }
             StatEntry::Close(t) => {
-                println!("statista: got response");
                 let index = t.id;
 
                 let mut requests = req_lock.lock().await;
@@ -83,7 +80,7 @@ pub(crate) async fn statista(
                             };
 
                             if let Some(gen_channel) = &to_generator {
-                                gen_channel.send(()).await.unwrap();
+                                let _ = gen_channel.send(()).await;
                             }
 
                             stat_pres_send.send(timestamp).await.expect("statista: should send request to presenter normally");
@@ -96,23 +93,16 @@ pub(crate) async fn statista(
         }
     }
 
-    // TODO:
-    // Here generator is finished.
-    // Send signal to transport receiver to finish if there are no pending requests.
-    // Otherwise wait till `requests` is empty and then send signal.
-    println!("statista: finished receiving");
 }
 
 async fn presenter(mut from_statista: Receiver<PingRTT>) {
     let mut sequence = RttSequence::new();
 
-    println!("presenter: started");
     while let Some(timestamp) = from_statista.recv().await {
         println!("seq: {} rtt: {:#?}", timestamp.index, timestamp.rtt);
         sequence.add(timestamp.rtt);
     }
     sequence.print_stats();
-    println!("presenter: finished");
 }
 
 struct RttSequence(Vec<Duration>);

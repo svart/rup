@@ -157,7 +157,6 @@ impl Transport for TcpClientTransport {
         Response {
             id: echo.id,
             timestamp: Instant::now(),
-            size: echo.len as usize,
         }
     }
 }

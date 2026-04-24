@@ -13,7 +13,6 @@ pub(crate) struct Request {
 pub(crate) struct Response {
     pub(crate) id: u64,
     pub(crate) timestamp: Instant,
-    pub(crate) size: usize,
 }
 
 pub(crate) struct Entry {
@@ -62,7 +61,6 @@ pub(crate) async fn generator(
     loop {
         if let Some(n) = ping_number {
             if id >= n {
-                println!("generator: all generated going out");
                 break;
             }
         }
@@ -89,7 +87,6 @@ pub(crate) async fn generator(
                         return;
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        println!("generator: got signal, going out");
                         return;
                     }
                 }
@@ -101,7 +98,6 @@ pub(crate) async fn generator(
                         return;
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        println!("generator: got signal, going out");
                         return;
                     }
                 }

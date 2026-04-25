@@ -58,7 +58,9 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
             }
         };
 
-        req.len = req.resp_size;
+        if req.resp_size > 0 {
+            req.len = req.resp_size;
+        }
         req.resp_size = 0;
 
         let mut send_buf = match bincode::serialize(&req) {
@@ -102,7 +104,7 @@ impl Transport for UdpClientTransport {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-            resp_size: req.response_size.unwrap_or(PING_HDR_LEN as u16),
+            resp_size: req.response_size.unwrap_or(0),
         };
 
         let mut send_buf = bincode::serialize(&r).map_err(|e| {

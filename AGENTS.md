@@ -21,14 +21,14 @@ TCP, and ICMP. Written in Rust (edition 2024) with tokio async runtime.
 ## Architecture
 
 ```
-generator ──Request──▶ transmitter ──StatEntry::Open──▶ statista ──PingRTT──▶ presenter
-                          │                                    ▲
-                     send()│                              recv()
+generator ──Request──> transmitter ──StatEntry::Open──> statista ──PingRTT──> presenter
+                          │                                    ^
+                    send()│                              recv()│
                           │                                    │
-                     ┌────┴────┐   StatEntry::Close ───────────┘
+                     ┌────┴──────┐───> StatEntry::Close ───────┘
                      │ Transport │
                      │  trait    │
-                     └────┬────┘
+                     └────┬──────┘
                     ┌─────┼─────┐
                UdpClient TcpClient IcmpClient
 ```

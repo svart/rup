@@ -61,7 +61,7 @@ impl Transport for IcmpClientTransport {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-            resp_size: req.response_size.unwrap_or(PING_HDR_LEN as u16),
+            resp_size: req.response_size.unwrap_or(0),
         };
 
         let seq_bytes = (req.id as u16).to_be_bytes();

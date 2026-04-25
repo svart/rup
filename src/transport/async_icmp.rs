@@ -16,6 +16,60 @@ fn is_ipv6(addr: &SocketAddr) -> bool {
     matches!(addr, SocketAddr::V6(_))
 }
 
+pub(crate) fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
+    let r = Echo {
+        id: req.id,
+        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
+        resp_size: req.response_size.unwrap_or(0),
+    };
+
+    let seq_bytes = (req.id as u16).to_be_bytes();
+    let echo_type: u8 = if is_v6 { 128 } else { 8 };
+
+    let mut packet = vec![
+        echo_type, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+        seq_bytes[0], seq_bytes[1],
+    ];
+
+    let payload = bincode::serialize(&r)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
+    packet.extend_from_slice(&payload);
+    packet.resize(ICMP_HEADER_LEN + data_len, 0);
+
+    if !is_v6 {
+        let checksum = csum16_slice(&packet);
+        packet[2] = (checksum >> 8) as u8;
+        packet[3] = (checksum & 0xff) as u8;
+    }
+
+    Ok(packet)
+}
+
+pub(crate) fn try_parse_icmp_response(
+    buf: &[u8],
+    n: usize,
+    reply_type: u8,
+) -> io::Result<Option<Response>> {
+    if n < DATA_OFFSET + PING_HDR_LEN {
+        return Ok(None);
+    }
+    if buf[0] != reply_type || buf[1] != 0x00 {
+        return Ok(None);
+    }
+    let echo: Echo = match bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(Response {
+        id: echo.id,
+        timestamp: Instant::now(),
+    }))
+}
+
 #[derive(Clone)]
 pub(crate) struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
@@ -58,35 +112,7 @@ impl IcmpClientTransport {
 
 impl Transport for IcmpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let r = Echo {
-            id: req.id,
-            len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-            resp_size: req.response_size.unwrap_or(0),
-        };
-
-        let seq_bytes = (req.id as u16).to_be_bytes();
-        let echo_type: u8 = if is_ipv6(&self.remote) { 128 } else { 8 };
-
-        let mut packet = vec![
-            echo_type, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            seq_bytes[0], seq_bytes[1],
-        ];
-
-        let payload = bincode::serialize(&r)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-        let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + data_len, 0);
-
-        if !is_ipv6(&self.remote) {
-            let checksum = csum16_slice(&packet);
-            packet[2] = (checksum >> 8) as u8;
-            packet[3] = (checksum & 0xff) as u8;
-        }
-
+        let packet = build_icmp_packet(req, is_ipv6(&self.remote))?;
         let ts = Instant::now();
         self.sock.send_to(&packet, self.remote).await?;
         Ok(ts)
@@ -106,25 +132,9 @@ impl Transport for IcmpClientTransport {
                 continue;
             }
 
-            if n < DATA_OFFSET + PING_HDR_LEN {
-                continue;
+            if let Some(resp) = try_parse_icmp_response(&buf, n, reply_type)? {
+                return Ok(resp);
             }
-
-            let icmp = &buf[..ICMP_HEADER_LEN];
-            if icmp[0] != reply_type || icmp[1] != 0x00 {
-                continue;
-            }
-
-            let echo: Echo =
-                match bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-            return Ok(Response {
-                id: echo.id,
-                timestamp: Instant::now(),
-            });
         }
     }
 }
@@ -155,6 +165,144 @@ fn csum16_slice(data: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_icmp_v4_packet_structure() {
+        let req = Request { id: 0xABCD, request_size: Some(PING_HDR_LEN as u16), response_size: None };
+        let packet = build_icmp_packet(&req, false).unwrap();
+
+        assert_eq!(packet[0], 8, "type = echo request");
+        assert_eq!(packet[1], 0, "code = 0");
+        assert_eq!(packet.len(), ICMP_HEADER_LEN + PING_HDR_LEN);
+        assert_eq!(packet[6], 0xAB);
+        assert_eq!(packet[7], 0xCD);
+
+        let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        assert_eq!(echo.id, 0xABCD);
+        assert_eq!(echo.len, PING_HDR_LEN as u16);
+        assert_eq!(echo.resp_size, 0);
+    }
+
+    #[test]
+    fn build_icmp_v4_checksum_valid() {
+        let req = Request { id: 1, request_size: None, response_size: None };
+        let packet = build_icmp_packet(&req, false).unwrap();
+
+        let verify = csum16_slice(&packet);
+        assert_eq!(verify, 0, "verified checksum must be zero");
+    }
+
+    #[test]
+    fn build_icmp_v6_no_checksum_in_packet() {
+        let req = Request { id: 1, request_size: None, response_size: None };
+        let packet = build_icmp_packet(&req, true).unwrap();
+
+        assert_eq!(packet[0], 128, "type = echo request v6");
+        assert_eq!(packet[2], 0, "no checksum set for v6");
+        assert_eq!(packet[3], 0);
+    }
+
+    #[test]
+    fn build_icmp_packet_variable_sizes() {
+        for size in [PING_HDR_LEN as u16, 64, 128, 256, 512] {
+            let req = Request { id: 10, request_size: Some(size), response_size: None };
+            let packet = build_icmp_packet(&req, false).unwrap();
+            assert_eq!(packet.len(), ICMP_HEADER_LEN + size as usize);
+
+            let verify = csum16_slice(&packet);
+            assert_eq!(verify, 0, "checksum valid for size={size}");
+
+            let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+            assert_eq!(echo.id, 10);
+            assert_eq!(echo.len, size);
+        }
+    }
+
+    #[test]
+    fn build_icmp_packet_with_resp_size() {
+        let req = Request { id: 42, request_size: Some(100), response_size: Some(200) };
+        let packet = build_icmp_packet(&req, false).unwrap();
+
+        let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        assert_eq!(echo.id, 42);
+        assert_eq!(echo.len, 100);
+        assert_eq!(echo.resp_size, 200);
+        assert_eq!(packet.len(), ICMP_HEADER_LEN + 100);
+    }
+
+    #[test]
+    fn try_parse_icmp_matching_reply() {
+        let req = Request { id: 7, request_size: None, response_size: None };
+        let send_pkt = build_icmp_packet(&req, false).unwrap();
+
+        let mut reply = send_pkt.clone();
+        reply[0] = 0;
+
+        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, 7);
+    }
+
+    #[test]
+    fn try_parse_icmp_wrong_type() {
+        let req = Request { id: 3, request_size: None, response_size: None };
+        let send_pkt = build_icmp_packet(&req, false).unwrap();
+
+        let mut reply = send_pkt.clone();
+        reply[0] = 3;
+        reply[1] = 0;
+
+        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_parse_icmp_wrong_code() {
+        let req = Request { id: 5, request_size: None, response_size: None };
+        let send_pkt = build_icmp_packet(&req, false).unwrap();
+
+        let mut reply = send_pkt.clone();
+        reply[1] = 1;
+
+        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_parse_icmp_too_short() {
+        let result = try_parse_icmp_response(&[0u8; 4], 4, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_parse_icmp_just_below_minimum() {
+        let buf = vec![0u8; DATA_OFFSET + PING_HDR_LEN - 1];
+        let result = try_parse_icmp_response(&buf, buf.len(), 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_parse_icmp_any_valid_bytes_accepted() {
+        let mut buf = vec![0xffu8; DATA_OFFSET + PING_HDR_LEN];
+        buf[0] = 0;
+        buf[1] = 0;
+        let result = try_parse_icmp_response(&buf, buf.len(), 0).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, u64::MAX);
+    }
+
+    #[test]
+    fn try_parse_icmp_v6_reply_type() {
+        let req = Request { id: 10, request_size: None, response_size: None };
+        let send_pkt = build_icmp_packet(&req, true).unwrap();
+
+        let mut reply = send_pkt.clone();
+        reply[0] = 129;
+
+        let result = try_parse_icmp_response(&reply, reply.len(), 129).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, 10);
+    }
 
     #[test]
     fn csum16_slice_even() {
@@ -208,138 +356,74 @@ mod tests {
     }
 
     #[test]
-    fn icmp_v4_packet_header_fields() {
-        let echo = Echo { id: 0x1234, len: PING_HDR_LEN as u16, resp_size: 0 };
-        let payload = bincode::serialize(&echo).unwrap();
-
-        let seq_bytes = (0x1234u64 as u16).to_be_bytes();
-        let echo_type: u8 = 8;
-        let mut packet = vec![
-            echo_type, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            seq_bytes[0], seq_bytes[1],
-        ];
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + PING_HDR_LEN, 0);
-
-        assert_eq!(packet[0], 8);
-        assert_eq!(packet[1], 0);
-        assert_eq!(packet[4], 0);
-        assert_eq!(packet[5], 0);
-        assert_eq!(packet[6], 0x12);
-        assert_eq!(packet[7], 0x34);
-        assert_eq!(packet.len(), ICMP_HEADER_LEN + PING_HDR_LEN);
-    }
-
-    #[test]
-    fn icmp_v4_checksum_correct() {
-        let echo = Echo { id: 0x0001, len: PING_HDR_LEN as u16, resp_size: 0 };
-        let payload = bincode::serialize(&echo).unwrap();
-
-        let seq_bytes = (0x0001u64 as u16).to_be_bytes();
-        let mut packet = vec![
-            8, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            seq_bytes[0], seq_bytes[1],
-        ];
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + PING_HDR_LEN, 0);
-
-        let checksum = csum16_slice(&packet);
-        packet[2] = (checksum >> 8) as u8;
-        packet[3] = (checksum & 0xff) as u8;
-
-        let verify_csum = csum16_slice(&packet);
-        assert_eq!(verify_csum, 0, "verified checksum should be 0");
-    }
-
-    #[test]
-    fn icmp_v6_packet_type() {
-        let echo = Echo { id: 1, len: PING_HDR_LEN as u16, resp_size: 0 };
-        let payload = bincode::serialize(&echo).unwrap();
-
-        let seq_bytes = (1u16).to_be_bytes();
-        let echo_type: u8 = 128;
-        let mut packet = vec![
-            echo_type, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            seq_bytes[0], seq_bytes[1],
-        ];
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + PING_HDR_LEN, 0);
-
-        assert_eq!(packet[0], 128);
-        assert_eq!(packet.len(), ICMP_HEADER_LEN + PING_HDR_LEN);
-    }
-
-    #[test]
-    fn icmp_reply_type_v4() {
-        assert_eq!(0u8, 0);
-    }
-
-    #[test]
-    fn icmp_reply_type_v6() {
-        assert_eq!(129u8, 129);
-    }
-
-    #[test]
-    fn icmp_packet_payload_starts_after_header() {
-        let echo = Echo { id: 0xDEAD, len: 42, resp_size: 100 };
-        let payload = bincode::serialize(&echo).unwrap();
-        assert_eq!(payload.len(), PING_HDR_LEN);
-
-        let seq_bytes = (0xDEADu64 as u16).to_be_bytes();
-        let mut packet = vec![
-            8, 0x00,
-            0x00, 0x00,
-            0x00, 0x00,
-            seq_bytes[0], seq_bytes[1],
-        ];
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + 42, 0);
-
-        let decoded: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
-        assert_eq!(decoded.id, 0xDEAD);
-        assert_eq!(decoded.len, 42);
-        assert_eq!(decoded.resp_size, 100);
-    }
-
-    #[test]
-    fn icmp_packet_minimum_size() {
-        let echo = Echo { id: 0, len: PING_HDR_LEN as u16, resp_size: 0 };
-        let payload = bincode::serialize(&echo).unwrap();
-
-        let mut packet = vec![8, 0, 0, 0, 0, 0, 0, 0];
-        packet.extend_from_slice(&payload);
-        packet.resize(ICMP_HEADER_LEN + PING_HDR_LEN, 0);
-
-        assert_eq!(packet.len(), ICMP_HEADER_LEN + PING_HDR_LEN);
-    }
-
-    #[test]
-    fn icmp_packet_variable_size() {
-        for data_len in [12, 64, 128, 256, 512] {
-            let echo = Echo { id: 1, len: data_len as u16, resp_size: 0 };
-            let payload = bincode::serialize(&echo).unwrap();
-
-            let mut packet = vec![8, 0, 0, 0, 0, 0, 0, 0];
-            packet.extend_from_slice(&payload);
-            packet.resize(ICMP_HEADER_LEN + data_len, 0);
-
-            assert_eq!(packet.len(), ICMP_HEADER_LEN + data_len);
-            let decoded: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
-            assert_eq!(decoded.id, 1);
-        }
-    }
-
-    #[test]
     fn is_ipv6_detection() {
         let v4: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let v6: SocketAddr = "[::1]:0".parse().unwrap();
         assert!(!is_ipv6(&v4));
         assert!(is_ipv6(&v6));
+    }
+
+    #[tokio::test]
+    async fn icmp_transport_ping_loopback() {
+        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let remote: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let transport = match IcmpClientTransport::new(local, remote).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("ICMP socket not available, skipping test: {e}");
+                return;
+            }
+        };
+
+        let req = Request {
+            id: 100,
+            request_size: None,
+            response_size: None,
+        };
+
+        transport.send(&req).await.unwrap();
+
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(resp.id, 100);
+    }
+
+    #[tokio::test]
+    async fn icmp_transport_ping_loopback_padded() {
+        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let remote: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let transport = match IcmpClientTransport::new(local, remote).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("ICMP socket not available, skipping test: {e}");
+                return;
+            }
+        };
+
+        let req = Request {
+            id: 200,
+            request_size: Some(64),
+            response_size: None,
+        };
+
+        transport.send(&req).await.unwrap();
+
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(resp.id, 200);
     }
 }

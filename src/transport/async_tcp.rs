@@ -13,6 +13,29 @@ use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(crate) fn build_tcp_echo(req: &Request) -> io::Result<Vec<u8>> {
+    let r = Echo {
+        id: req.id,
+        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
+        resp_size: req.response_size.unwrap_or(0),
+    };
+
+    let mut buf = bincode::serialize(&r).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
+    })?;
+
+    if let Some(size) = req.request_size {
+        buf.resize(size as usize, 0);
+    }
+
+    Ok(buf)
+}
+
+pub(crate) fn parse_tcp_header(hdr: &[u8; PING_HDR_LEN]) -> io::Result<Echo> {
+    bincode::deserialize(hdr)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize header: {e}")))
+}
+
 async fn server_connection_handler(mut sock: TcpStream) {
     let peer_addr = match sock.peer_addr() {
         Ok(a) => a,
@@ -126,20 +149,7 @@ impl TcpClientTransport {
 
 impl Transport for TcpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let r = Echo {
-            id: req.id,
-            len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-            resp_size: req.response_size.unwrap_or(0),
-        };
-
-        let mut send_buf = bincode::serialize(&r).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
-        })?;
-
-        if let Some(size) = req.request_size {
-            send_buf.resize(size as usize, 0);
-        }
-
+        let send_buf = build_tcp_echo(req)?;
         let mut offset = 0;
         while offset < send_buf.len() {
             timeout(IO_TIMEOUT, self.stream.writable())
@@ -184,9 +194,7 @@ impl Transport for TcpClientTransport {
             }
         }
 
-        let echo: Echo = bincode::deserialize(&hdr).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("deserialize header: {e}"))
-        })?;
+        let echo = parse_tcp_header(&hdr)?;
 
         if echo.len as usize > PING_HDR_LEN {
             let remaining = echo.len as usize - PING_HDR_LEN;
@@ -230,6 +238,63 @@ impl Transport for TcpClientTransport {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn build_tcp_echo_default_size() {
+        let req = Request { id: 10, request_size: None, response_size: None };
+        let buf = build_tcp_echo(&req).unwrap();
+        assert_eq!(buf.len(), PING_HDR_LEN);
+        let echo: Echo = bincode::deserialize(&buf).unwrap();
+        assert_eq!(echo.id, 10);
+        assert_eq!(echo.len, PING_HDR_LEN as u16);
+    }
+
+    #[test]
+    fn build_tcp_echo_padded() {
+        let req = Request { id: 99, request_size: Some(64), response_size: None };
+        let buf = build_tcp_echo(&req).unwrap();
+        assert_eq!(buf.len(), 64);
+        assert_eq!(&buf[PING_HDR_LEN..], &[0u8; 64 - PING_HDR_LEN]);
+    }
+
+    #[test]
+    fn build_tcp_echo_with_resp_size() {
+        let req = Request { id: 5, request_size: Some(50), response_size: Some(200) };
+        let buf = build_tcp_echo(&req).unwrap();
+        let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
+        assert_eq!(echo.id, 5);
+        assert_eq!(echo.resp_size, 200);
+    }
+
+    #[test]
+    fn parse_tcp_header_valid() {
+        let req = Request { id: 42, request_size: Some(100), response_size: Some(200) };
+        let buf = build_tcp_echo(&req).unwrap();
+        let mut hdr = [0u8; PING_HDR_LEN];
+        hdr.copy_from_slice(&buf[..PING_HDR_LEN]);
+        let echo = parse_tcp_header(&hdr).unwrap();
+        assert_eq!(echo.id, 42);
+        assert_eq!(echo.len, 100);
+        assert_eq!(echo.resp_size, 200);
+    }
+
+    #[test]
+    fn parse_tcp_header_all_ff_decodes_to_max() {
+        let hdr = [0xff; PING_HDR_LEN];
+        let echo = parse_tcp_header(&hdr).unwrap();
+        assert_eq!(echo.id, u64::MAX);
+        assert_eq!(echo.len, u16::MAX);
+        assert_eq!(echo.resp_size, u16::MAX);
+    }
+
+    #[test]
+    fn parse_tcp_header_partial() {
+        let hdr = [0u8; PING_HDR_LEN];
+        let echo = parse_tcp_header(&hdr).unwrap();
+        assert_eq!(echo.id, 0);
+        assert_eq!(echo.len, 0);
+        assert_eq!(echo.resp_size, 0);
+    }
 
     #[tokio::test]
     async fn tcp_transport_send_and_receive() {
@@ -355,42 +420,6 @@ mod tests {
         transport.send(&req).await.unwrap();
         let resp = transport.recv().await.unwrap();
         assert_eq!(resp.id, 7);
-
-        server_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tcp_echo_server_response_respects_resp_size() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let client_stream = TcpStream::connect(server_addr).await.unwrap();
-        let (mut server_stream, _) = listener.accept().await.unwrap();
-
-        let transport = TcpClientTransport::new(client_stream);
-
-        let server_handle = tokio::spawn(async move {
-            let mut hdr = [0; PING_HDR_LEN];
-            server_stream.read_exact(&mut hdr).await.unwrap();
-            let echo: Echo = bincode::deserialize(&hdr).unwrap();
-            let remaining = echo.len as usize - PING_HDR_LEN;
-            if remaining > 0 {
-                let mut extra = vec![0; remaining];
-                server_stream.read_exact(&mut extra).await.unwrap();
-            }
-            let mut send_buf = hdr.to_vec();
-            send_buf.resize(echo.len as usize, 0);
-            let _ = server_stream.write_all(&send_buf).await;
-        });
-
-        let req = Request {
-            id: 5,
-            request_size: Some(PING_HDR_LEN as u16),
-            response_size: Some(32),
-        };
-        transport.send(&req).await.unwrap();
-        let resp = transport.recv().await.unwrap();
-        assert_eq!(resp.id, 5);
 
         server_handle.await.unwrap();
     }

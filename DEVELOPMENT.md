@@ -31,7 +31,7 @@ receiver adapters.
 ### Running tests
 
 ```sh
-cargo test                # all 104+ tests
+cargo test                # all 133+ tests
 cargo test -- --nocapture # show stdout (timeout/reorder messages, stats)
 cargo test <name>         # single test, e.g. cargo test generator_adaptive_mode
 cargo clippy              # zero warnings required
@@ -111,20 +111,32 @@ condition/decision coverage.
 | `src/pinger.rs` | 97.74% | 98.21% | Echo serialization + generator paths |
 | `src/statistics.rs` | 82.54% | 83.76% | Matching logic, RttSequence stats, timeouts |
 | `src/transport/mod.rs` | 93.03% | 94.52% | Transmitter/receiver adapters, mocks |
-| `src/transport/async_icmp.rs` | 64.91% | 65.98% | Packet assembly + checksum tested; I/O paths need ICMP socket |
-| `src/transport/async_tcp.rs` | 65.68% | 68.98% | Client send/recv tested with real sockets; server loop untested |
-| `src/transport/async_udp.rs` | 69.90% | 70.03% | Client send/recv tested with real sockets; server loop untested |
+| `src/transport/async_icmp.rs` | 93.07% | 92.70% | Extracted `build_icmp_packet`/`try_parse_icmp_response` + loopback integration |
+| `src/transport/async_tcp.rs` | 69.16% | 71.90% | Extracted `build_tcp_echo`/`parse_tcp_header` + real socket tests; server loop untested |
+| `src/transport/async_udp.rs` | 76.86% | 78.32% | Extracted `build_udp_echo`/`parse_udp_response` + real socket tests; server loop untested |
 | `src/cli.rs` | 89.50% | 87.64% | Argument parsing; `get_cli_params()` uses `std::process::exit` |
 | `src/main.rs` | 46.30% | 49.00% | `has_port`/`ensure_port`/`spawn_tasks` tested; DNS + wiring not tested |
-| **Total** | **77.52%** | **77.89%** | |
+| **Total** | **81.81%** | **82.52%** | |
+
+### Design for testability
+
+Each transport's I/O and protocol logic is cleanly separated:
+
+| Transport | Packet builder | Response parser | Test coverage |
+|-----------|---------------|-----------------|---------------|
+| ICMP | `build_icmp_packet(req, is_v6)` | `try_parse_icmp_response(buf, n, reply_type)` | ✓ unit tests for all branches + real ICMP ping to `127.0.0.1` |
+| UDP | `build_udp_echo(req)` | `parse_udp_response(buf)` | ✓ unit tests for sizes/error/edge cases + real loopback socket |
+| TCP | `build_tcp_echo(req)` | `parse_tcp_header(hdr)` | ✓ unit tests for sizes/edge cases + real loopback socket |
+
+All three production `send()`/`recv()` methods call these extracted functions,
+so the same logic is exercised by both unit tests and real I/O.
 
 ### Uncovered areas
 
-- **ICMP I/O paths** — `IcmpClientTransport::send()`/`recv()` require
-  `CAP_NET_RAW` or `ping_group_range` sysctl. The packet assembly and
-  checksum logic IS tested via packet-level unit tests.
 - **TCP/UDP server loops** — `server_transport()` functions are infinite
   loops with `tokio::select!` (listening + ctrl-c). Exercised manually.
+- **TCP/UDP I/O error paths** — `WouldBlock` branches (hard to trigger on
+  loopback), timeout branches (need artificial delay).
 - **main.rs wiring** — DNS resolution (`tokio::net::lookup_host`) and
   protocol dispatch (`match protocol.as_str()`) require real network or
   are tightly coupled to `main()`.

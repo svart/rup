@@ -7,6 +7,7 @@ use crate::pinger::PING_HDR_LEN;
 fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
+        .version("0.5.1")
         .subcommand(
             Command::new("client")
                 .about("Send requests to the remote side and measure RTT")
@@ -151,6 +152,9 @@ pub(crate) fn get_cli_params() -> CliParams {
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
             protocol,
         }),
-        _ => unreachable!(),
+        _ => {
+            eprintln!("error: unrecognized subcommand");
+            std::process::exit(1);
+        }
     }
 }

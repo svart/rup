@@ -12,6 +12,10 @@ use crate::transport::Transport;
 const ICMP_HEADER_LEN: usize = 8;
 const DATA_OFFSET: usize = ICMP_HEADER_LEN;
 
+fn is_ipv6(addr: &SocketAddr) -> bool {
+    matches!(addr, SocketAddr::V6(_))
+}
+
 #[derive(Clone)]
 pub(crate) struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
@@ -20,7 +24,13 @@ pub(crate) struct IcmpClientTransport {
 
 impl IcmpClientTransport {
     pub(crate) async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
-        let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).map_err(|e| {
+        let (domain, protocol) = if is_ipv6(&remote) {
+            (Domain::IPV6, Protocol::ICMPV6)
+        } else {
+            (Domain::IPV4, Protocol::ICMPV4)
+        };
+
+        let sock = Socket::new(domain, Type::DGRAM, Some(protocol)).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -55,9 +65,10 @@ impl Transport for IcmpClientTransport {
         };
 
         let seq_bytes = (req.id as u16).to_be_bytes();
+        let echo_type: u8 = if is_ipv6(&self.remote) { 128 } else { 8 };
 
         let mut packet = vec![
-            0x08, 0x00,
+            echo_type, 0x00,
             0x00, 0x00,
             0x00, 0x00,
             seq_bytes[0], seq_bytes[1],
@@ -70,9 +81,11 @@ impl Transport for IcmpClientTransport {
         packet.extend_from_slice(&payload);
         packet.resize(ICMP_HEADER_LEN + data_len, 0);
 
-        let checksum = csum16_slice(&packet);
-        packet[2] = (checksum >> 8) as u8;
-        packet[3] = (checksum & 0xff) as u8;
+        if !is_ipv6(&self.remote) {
+            let checksum = csum16_slice(&packet);
+            packet[2] = (checksum >> 8) as u8;
+            packet[3] = (checksum & 0xff) as u8;
+        }
 
         let ts = Instant::now();
         self.sock.send_to(&packet, self.remote).await?;
@@ -81,6 +94,7 @@ impl Transport for IcmpClientTransport {
 
     async fn recv(self: &Self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
+        let reply_type: u8 = if is_ipv6(&self.remote) { 129 } else { 0 };
 
         loop {
             let (n, addr) = match self.sock.recv_from(&mut buf).await {
@@ -97,7 +111,7 @@ impl Transport for IcmpClientTransport {
             }
 
             let icmp = &buf[..ICMP_HEADER_LEN];
-            if icmp[0] != 0x00 || icmp[1] != 0x00 {
+            if icmp[0] != reply_type || icmp[1] != 0x00 {
                 continue;
             }
 

@@ -10,6 +10,7 @@ pub(crate) struct Request {
     pub(crate) response_size: Option<u16>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Response {
     pub(crate) id: u64,
     pub(crate) timestamp: Instant,

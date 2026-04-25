@@ -3,7 +3,7 @@ use std::time::Duration;
 use std::{cmp::Ordering, collections::VecDeque};
 
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::sleep;
 
 use crate::pinger::{Entry, StatEntry};
@@ -57,12 +57,16 @@ pub(crate) async fn statista(
     let req_lock = Arc::new(Mutex::new(VecDeque::<Entry>::new()));
     let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) =
         mpsc::channel(32);
+    let (sent_tx, sent_rx) = oneshot::channel();
 
-    tokio::spawn(presenter(stat_pres_recv));
+    tokio::spawn(presenter(stat_pres_recv, sent_rx));
+
+    let mut total_sent = 0u64;
 
     while let Some(resp) = from_transport.recv().await {
         match resp {
             StatEntry::Open(t) => {
+                total_sent += 1;
                 tokio::spawn(receive_timeout(
                     t.id,
                     req_lock.clone(),
@@ -105,15 +109,23 @@ pub(crate) async fn statista(
             }
         }
     }
+
+    let _ = sent_tx.send(total_sent);
 }
 
-async fn presenter(mut from_statista: Receiver<PingRTT>) {
+async fn presenter(
+    mut from_statista: Receiver<PingRTT>,
+    sent_rx: oneshot::Receiver<u64>,
+) {
     let mut sequence = RttSequence::new();
 
     while let Some(t) = from_statista.recv().await {
         println!("seq={} time={}", t.index, fmt_duration(t.rtt));
         sequence.record(t);
     }
+
+    let total_sent = sent_rx.await.unwrap_or(sequence.received);
+    sequence.set_total_sent(total_sent);
     sequence.print_stats();
 }
 
@@ -134,8 +146,11 @@ impl RttSequence {
 
     fn record(&mut self, p: PingRTT) {
         self.rtts.push(p.rtt);
-        self.sent = self.sent.max(p.index + 1);
         self.received += 1;
+    }
+
+    fn set_total_sent(&mut self, n: u64) {
+        self.sent = n;
     }
 
     fn mean(&self) -> Duration {
@@ -212,13 +227,14 @@ mod tests {
     }
 
     #[test]
-    fn rtt_sequence_sent_tracking() {
+    fn rtt_sequence_exact_sent_tracking() {
         let mut seq = RttSequence::new();
         seq.record(PingRTT {
             index: 9,
             rtt: Duration::from_micros(50),
         });
-        assert!(seq.sent >= 10);
+        seq.set_total_sent(10);
+        assert_eq!(seq.sent, 10);
         assert_eq!(seq.received, 1);
     }
 

@@ -92,11 +92,19 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     };
 
     loop {
-        match listen_sock.accept().await {
-            Ok((socket, _)) => {
-                tokio::spawn(server_connection_handler(socket));
+        tokio::select! {
+            result = listen_sock.accept() => {
+                match result {
+                    Ok((socket, _)) => {
+                        tokio::spawn(server_connection_handler(socket));
+                    }
+                    Err(e) => eprintln!("Connection failed: {e}"),
+                }
             }
-            Err(e) => eprintln!("Connection failed: {e}"),
+            _ = tokio::signal::ctrl_c() => {
+                println!("TCP server shutting down");
+                return;
+            }
         }
     }
 }

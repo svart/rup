@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use tokio::runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::task::JoinHandle;
 
 use crate::cli::CliParams::{PingerParams, ServerParams};
-use pinger::{SendMode, StatEntry};
+use pinger::{Request, SendMode, StatEntry};
 
 mod transport;
 mod cli;
@@ -14,8 +15,8 @@ mod statistics;
 use transport::async_icmp::IcmpClientTransport;
 use transport::async_tcp::TcpClientTransport;
 use transport::async_udp::UdpClientTransport;
-use transport::{transmitter, receiver};
-use pinger::Request;
+use transport::Transport;
+use transport::{receiver, transmitter};
 
 fn ensure_port(addr: &str, protocol: &str) -> String {
     let has_port = if addr.starts_with('[') {
@@ -32,11 +33,25 @@ fn ensure_port(addr: &str, protocol: &str) -> String {
         }
     };
 
-    if has_port || protocol != "icmp" {
-        addr.to_string()
-    } else {
-        format!("{addr}:0")
+    if has_port {
+        return addr.to_string();
     }
+    if protocol == "icmp" {
+        return format!("{addr}:0");
+    }
+    eprintln!("error: {protocol} requires a port (e.g. {addr}:PORT)");
+    std::process::exit(1);
+}
+
+fn spawn_tasks<T: Transport + Clone + Send + 'static>(
+    transport: T,
+    gen_txtr_recv: Receiver<Request>,
+    txtr_stat_send: Sender<StatEntry>,
+) -> (JoinHandle<()>, JoinHandle<()>) {
+    let t2 = transport.clone();
+    let tx = tokio::spawn(transmitter(t2, gen_txtr_recv, txtr_stat_send.clone()));
+    let rx = tokio::spawn(receiver(transport, txtr_stat_send));
+    (tx, rx)
 }
 
 fn main() {
@@ -59,7 +74,6 @@ fn main() {
             let (send_mode, txtr_gen) = if params.adaptive {
                 let (txtr_gen_send, txtr_gen_recv): (Sender<()>, Receiver<()>) =
                     mpsc::channel(channel_cap);
-
                 (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
             } else {
                 (SendMode::Interval(params.interval), None)
@@ -95,21 +109,24 @@ fn main() {
                                 return;
                             }
                         };
-                        let t2 = transport.clone();
-                        let tx = tokio::spawn(transmitter(
-                            t2,
-                            gen_txtr_recv,
-                            txtr_stat_send.clone(),
-                        ));
-                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
-                        (tx, rx)
+                        spawn_tasks(transport, gen_txtr_recv, txtr_stat_send)
                     }
                     "tcp" => {
-                        let sock = match tokio::net::TcpSocket::new_v4() {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("TCP socket creation failed: {e}");
-                                return;
+                        let sock = if remote_addr.is_ipv4() {
+                            match tokio::net::TcpSocket::new_v4() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("TCP socket creation failed: {e}");
+                                    return;
+                                }
+                            }
+                        } else {
+                            match tokio::net::TcpSocket::new_v6() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("TCP socket creation failed: {e}");
+                                    return;
+                                }
                             }
                         };
                         if let Err(e) = sock.bind(params.local_address) {
@@ -124,14 +141,7 @@ fn main() {
                             }
                         };
                         let transport = TcpClientTransport::new(stream);
-                        let t2 = transport.clone();
-                        let tx = tokio::spawn(transmitter(
-                            t2,
-                            gen_txtr_recv,
-                            txtr_stat_send.clone(),
-                        ));
-                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
-                        (tx, rx)
+                        spawn_tasks(transport, gen_txtr_recv, txtr_stat_send)
                     }
                     "icmp" => {
                         let transport = match IcmpClientTransport::new(
@@ -146,14 +156,7 @@ fn main() {
                                 return;
                             }
                         };
-                        let t2 = transport.clone();
-                        let tx = tokio::spawn(transmitter(
-                            t2,
-                            gen_txtr_recv,
-                            txtr_stat_send.clone(),
-                        ));
-                        let rx = tokio::spawn(receiver(transport, txtr_stat_send));
-                        (tx, rx)
+                        spawn_tasks(transport, gen_txtr_recv, txtr_stat_send)
                     }
                     _ => {
                         eprintln!("unknown protocol: {}", params.protocol);

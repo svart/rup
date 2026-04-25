@@ -24,11 +24,19 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
     let mut buf = vec![0; u16::MAX as usize];
 
     loop {
-        let (n, addr) = match sock.recv_from(&mut buf).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("server: recv error: {e}");
-                continue;
+        let (n, addr) = tokio::select! {
+            result = sock.recv_from(&mut buf) => {
+                match result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("server: recv error: {e}");
+                        continue;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("UDP server shutting down");
+                return;
             }
         };
 

@@ -13,7 +13,7 @@ use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) fn build_tcp_echo(req: &Request) -> io::Result<Vec<u8>> {
+pub fn build_tcp_echo(req: &Request) -> io::Result<Vec<u8>> {
     let r = Echo {
         id: req.id,
         len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -31,7 +31,7 @@ pub(crate) fn build_tcp_echo(req: &Request) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub(crate) fn parse_tcp_header(hdr: &[u8; PING_HDR_LEN]) -> io::Result<Echo> {
+pub fn parse_tcp_header(hdr: &[u8; PING_HDR_LEN]) -> io::Result<Echo> {
     bincode::deserialize(hdr)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize header: {e}")))
 }
@@ -106,7 +106,7 @@ async fn server_connection_handler(mut sock: TcpStream) {
     }
 }
 
-pub(crate) async fn server_transport(local_address: SocketAddr) {
+pub async fn server_transport(local_address: SocketAddr) {
     println!("Running TCP server listening {local_address}");
     let listen_sock = match TcpListener::bind(local_address).await {
         Ok(s) => s,
@@ -135,12 +135,12 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
 }
 
 #[derive(Clone)]
-pub(crate) struct TcpClientTransport {
+pub struct TcpClientTransport {
     stream: Arc<TcpStream>,
 }
 
 impl TcpClientTransport {
-    pub(crate) fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream) -> Self {
         TcpClientTransport {
             stream: Arc::new(stream),
         }

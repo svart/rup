@@ -9,7 +9,7 @@ use tokio::net::UdpSocket;
 use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
 use crate::transport::Transport;
 
-pub(crate) fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
+pub fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
     let r = Echo {
         id: req.id,
         len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -27,7 +27,7 @@ pub(crate) fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub(crate) fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
+pub fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
     if buf.len() < PING_HDR_LEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -45,7 +45,7 @@ pub(crate) fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
     })
 }
 
-pub(crate) async fn server_transport(local_address: SocketAddr) {
+pub async fn server_transport(local_address: SocketAddr) {
     println!("Running UDP server listening {local_address}");
 
     let sock = match UdpSocket::bind(local_address).await {
@@ -116,12 +116,12 @@ pub(crate) async fn server_transport(local_address: SocketAddr) {
 }
 
 #[derive(Clone)]
-pub(crate) struct UdpClientTransport {
+pub struct UdpClientTransport {
     socket: Arc<UdpSocket>,
 }
 
 impl UdpClientTransport {
-    pub(crate) async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
+    pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(local).await.map_err(|e| {
             io::Error::new(e.kind(), format!("client bind to {local} failed: {e}"))
         })?;

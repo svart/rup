@@ -4,48 +4,18 @@ use tokio::runtime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinHandle;
 
-use crate::cli::CliParams::{PingerParams, ServerParams};
-use pinger::{Request, SendMode, StatEntry};
-#[cfg(test)]
-use pinger::Response;
-
-mod transport;
 mod cli;
-mod pinger;
-mod statistics;
 
-use transport::async_icmp::IcmpClientTransport;
-use transport::async_tcp::TcpClientTransport;
-use transport::async_udp::UdpClientTransport;
-use transport::Transport;
-use transport::{receiver, transmitter};
-
-fn has_port(addr: &str) -> bool {
-    if addr.starts_with('[') {
-        let after_bracket = addr.split(']').nth(1).unwrap_or("");
-        after_bracket.starts_with(':')
-    } else {
-        let last_colon = addr.rfind(':');
-        match last_colon {
-            Some(i) => {
-                let after = &addr[i + 1..];
-                !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
-            }
-            None => false,
-        }
-    }
-}
-
-fn ensure_port(addr: &str, protocol: &str) -> String {
-    if has_port(addr) {
-        return addr.to_string();
-    }
-    if protocol == "icmp" {
-        return format!("{addr}:0");
-    }
-    eprintln!("error: {protocol} requires a port (e.g. {addr}:PORT)");
-    std::process::exit(1);
-}
+use cli::CliParams::{PingerParams, ServerParams};
+use rup::pinger::{Request, SendMode, StatEntry};
+#[cfg(test)]
+use rup::pinger::Response;
+use rup::transport::async_icmp::IcmpClientTransport;
+use rup::transport::async_tcp::TcpClientTransport;
+use rup::transport::async_udp::UdpClientTransport;
+use rup::transport::Transport;
+use rup::transport::{receiver, transmitter};
+use rup::ensure_port;
 
 fn spawn_tasks<T: Transport + Clone + Send + 'static>(
     transport: T,
@@ -168,7 +138,7 @@ fn main() {
                     }
                 };
 
-                let generator = tokio::spawn(pinger::generator(
+                let generator = tokio::spawn(rup::pinger::generator(
                     gen_txtr_send,
                     send_mode,
                     params.ping_number,
@@ -176,7 +146,7 @@ fn main() {
                     params.request_size,
                     params.response_size,
                 ));
-                let statista = tokio::spawn(statistics::statista(
+                let statista = tokio::spawn(rup::statistics::statista(
                     txtr_stat_recv,
                     txtr_gen,
                     Duration::from_millis(params.wait_time),
@@ -198,10 +168,10 @@ fn main() {
         ServerParams(params) => {
             rt.block_on(async {
                 let server = match params.protocol.as_str() {
-                    "tcp" => tokio::spawn(transport::async_tcp::server_transport(
+                    "tcp" => tokio::spawn(rup::transport::async_tcp::server_transport(
                         params.local_address,
                     )),
-                    "udp" => tokio::spawn(transport::async_udp::server_transport(
+                    "udp" => tokio::spawn(rup::transport::async_udp::server_transport(
                         params.local_address,
                     )),
                     "icmp" => {
@@ -225,7 +195,7 @@ mod tests {
     use super::*;
     use std::io;
     use std::time::Instant;
-    use transport::Transport;
+    use rup::transport::Transport;
 
     struct NoopTransport;
 
@@ -254,90 +224,5 @@ mod tests {
 
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), tx_h).await;
         rx_h.abort();
-    }
-
-    #[test]
-    fn has_port_detects_v4_with_port() {
-        assert!(has_port("127.0.0.1:5000"));
-    }
-
-    #[test]
-    fn has_port_detects_v4_without_port() {
-        assert!(!has_port("127.0.0.1"));
-    }
-
-    #[test]
-    fn has_port_detects_v6_with_port() {
-        assert!(has_port("[::1]:5000"));
-    }
-
-    #[test]
-    fn has_port_detects_v6_without_port() {
-        assert!(!has_port("[::1]"));
-    }
-
-    #[test]
-    fn has_port_detects_hostname_with_port() {
-        assert!(has_port("localhost:8080"));
-    }
-
-    #[test]
-    fn has_port_detects_hostname_without_port() {
-        assert!(!has_port("localhost"));
-    }
-
-    #[test]
-    fn has_port_empty_after_colon() {
-        assert!(!has_port("127.0.0.1:"));
-    }
-
-    #[test]
-    fn has_port_non_numeric_after_colon() {
-        assert!(!has_port("127.0.0.1:abc"));
-    }
-
-    #[test]
-    fn has_port_multiple_colons_ipv6() {
-        assert!(has_port("[2001:db8::1]:8080"));
-    }
-
-    #[test]
-    fn has_port_multiple_colons_no_port() {
-        assert!(!has_port("[2001:db8::1]"));
-    }
-
-    #[test]
-    fn has_port_empty_string() {
-        assert!(!has_port(""));
-    }
-
-    #[test]
-    fn has_port_just_port_number() {
-        assert!(has_port(":5000"));
-    }
-
-    #[test]
-    fn ensure_port_keeps_existing_v4() {
-        assert_eq!(ensure_port("10.0.0.1:9999", "udp"), "10.0.0.1:9999");
-    }
-
-    #[test]
-    fn ensure_port_keeps_existing_v6() {
-        assert_eq!(ensure_port("[::1]:443", "tcp"), "[::1]:443");
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_v4() {
-        assert_eq!(ensure_port("192.168.1.1", "icmp"), "192.168.1.1:0");
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_v6() {
-        assert_eq!(ensure_port("[::1]", "icmp"), "[::1]:0");
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_hostname() {
-        assert_eq!(ensure_port("localhost", "icmp"), "localhost:0");
     }
 }

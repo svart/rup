@@ -7,6 +7,7 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::time::sleep;
 
 use crate::pinger::{Entry, StatEntry};
+use crate::PingResult;
 
 #[derive(Debug)]
 struct PingRTT {
@@ -49,7 +50,7 @@ async fn receive_timeout(
     }
 }
 
-pub(crate) async fn statista(
+pub async fn statista(
     mut from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
@@ -113,6 +114,61 @@ pub(crate) async fn statista(
     let _ = sent_tx.send(total_sent);
 }
 
+pub async fn statista_with_collector(
+    mut from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+    collector: Sender<PingResult>,
+) {
+    let req_lock = Arc::new(Mutex::new(VecDeque::<Entry>::new()));
+
+    while let Some(resp) = from_transport.recv().await {
+        match resp {
+            StatEntry::Open(t) => {
+                tokio::spawn(receive_timeout(
+                    t.id,
+                    req_lock.clone(),
+                    wait_time,
+                    to_generator.clone(),
+                ));
+
+                let mut requests = req_lock.lock().await;
+                requests.push_back(t);
+            }
+            StatEntry::Close(t) => {
+                let index = t.id;
+
+                let mut requests = req_lock.lock().await;
+
+                while let Some(req) = requests.pop_front() {
+                    match index.cmp(&req.id) {
+                        Ordering::Greater => {
+                            continue;
+                        }
+                        Ordering::Equal => {
+                            let rtt = t.ts.duration_since(req.ts);
+
+                            if let Some(gen_channel) = &to_generator {
+                                let _ = gen_channel.send(()).await;
+                            }
+
+                            if collector
+                                .send(PingResult { seq: index, rtt })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Ordering::Less => requests.push_front(req),
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
 async fn presenter(
     mut from_statista: Receiver<PingRTT>,
     sent_rx: oneshot::Receiver<u64>,
@@ -121,7 +177,7 @@ async fn presenter(
 
     while let Some(t) = from_statista.recv().await {
         println!("seq={} time={}", t.index, fmt_duration(t.rtt));
-        sequence.record(t);
+        sequence.record(t.rtt);
     }
 
     let total_sent = sent_rx.await.unwrap_or(sequence.received);
@@ -129,14 +185,20 @@ async fn presenter(
     sequence.print_stats();
 }
 
-struct RttSequence {
+pub struct RttSequence {
     rtts: Vec<Duration>,
     sent: u64,
     received: u64,
 }
 
+impl Default for RttSequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RttSequence {
-    fn new() -> Self {
+    pub fn new() -> Self {
         RttSequence {
             rtts: Vec::with_capacity(1024),
             sent: 0,
@@ -144,22 +206,22 @@ impl RttSequence {
         }
     }
 
-    fn record(&mut self, p: PingRTT) {
-        self.rtts.push(p.rtt);
+    pub fn record(&mut self, rtt: Duration) {
+        self.rtts.push(rtt);
         self.received += 1;
     }
 
-    fn set_total_sent(&mut self, n: u64) {
+    pub fn set_total_sent(&mut self, n: u64) {
         self.sent = n;
     }
 
-    fn mean(&self) -> Duration {
+    pub fn mean(&self) -> Duration {
         let avg =
             self.rtts.iter().sum::<Duration>().as_nanos() / self.rtts.len() as u128;
         Duration::from_nanos(u64::try_from(avg).unwrap_or(u64::MAX))
     }
 
-    fn std_deviation(&self) -> Duration {
+    pub fn std_deviation(&self) -> Duration {
         let avg = self.mean();
         let variance = self
             .rtts
@@ -173,7 +235,7 @@ impl RttSequence {
         Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.)
     }
 
-    fn print_stats(&mut self) {
+    pub fn print_stats(&mut self) {
         if self.rtts.is_empty() {
             println!("no statistics collected");
             return;
@@ -219,10 +281,7 @@ mod tests {
     fn rtt_sequence_mean() {
         let mut seq = RttSequence::new();
         for i in 0..4 {
-            seq.record(PingRTT {
-                index: i,
-                rtt: Duration::from_micros(100 * (i as u64 + 1)),
-            });
+            seq.record(Duration::from_micros(100 * (i as u64 + 1)));
         }
         assert_eq!(seq.mean(), Duration::from_micros(250));
     }
@@ -230,15 +289,15 @@ mod tests {
     #[test]
     fn rtt_sequence_mean_single_entry() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(42) });
+        seq.record(Duration::from_micros(42));
         assert_eq!(seq.mean(), Duration::from_micros(42));
     }
 
     #[test]
     fn rtt_sequence_mean_large_values() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_secs(10) });
-        seq.record(PingRTT { index: 1, rtt: Duration::from_secs(20) });
+        seq.record(Duration::from_secs(10));
+        seq.record(Duration::from_secs(20));
         assert_eq!(seq.mean(), Duration::from_secs(15));
     }
 
@@ -246,7 +305,7 @@ mod tests {
     fn rtt_sequence_median_odd() {
         let mut seq = RttSequence::new();
         for i in 0..5 {
-            seq.record(PingRTT { index: i, rtt: Duration::from_micros((i as u64 + 1) * 10) });
+            seq.record(Duration::from_micros((i as u64 + 1) * 10));
         }
         seq.set_total_sent(5);
         seq.rtts.sort();
@@ -257,7 +316,7 @@ mod tests {
     fn rtt_sequence_median_even() {
         let mut seq = RttSequence::new();
         for i in 0..4 {
-            seq.record(PingRTT { index: i, rtt: Duration::from_micros((i as u64 + 1) * 10) });
+            seq.record(Duration::from_micros((i as u64 + 1) * 10));
         }
         seq.set_total_sent(4);
         seq.rtts.sort();
@@ -267,7 +326,7 @@ mod tests {
     #[test]
     fn rtt_sequence_single_entry() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(100) });
+        seq.record(Duration::from_micros(100));
         seq.set_total_sent(1);
         seq.rtts.sort();
         assert_eq!(seq.rtts.len(), 1);
@@ -280,7 +339,7 @@ mod tests {
     fn rtt_sequence_large_dataset() {
         let mut seq = RttSequence::new();
         for i in 0..1000 {
-            seq.record(PingRTT { index: i as u64, rtt: Duration::from_nanos(i) });
+            seq.record(Duration::from_nanos(i));
         }
         seq.set_total_sent(1000);
         assert_eq!(seq.received, 1000);
@@ -290,8 +349,8 @@ mod tests {
     #[test]
     fn rtt_sequence_std_dev_zero() {
         let mut seq = RttSequence::new();
-        for i in 0..3 {
-            seq.record(PingRTT { index: i, rtt: Duration::from_micros(100) });
+        for _ in 0..3 {
+            seq.record(Duration::from_micros(100));
         }
         assert_eq!(seq.std_deviation(), Duration::from_nanos(0));
     }
@@ -299,8 +358,8 @@ mod tests {
     #[test]
     fn rtt_sequence_std_dev_known() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(0) });
-        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(100) });
+        seq.record(Duration::from_micros(0));
+        seq.record(Duration::from_micros(100));
         let std_dev = seq.std_deviation();
         assert!(std_dev.as_micros() > 0);
     }
@@ -308,10 +367,7 @@ mod tests {
     #[test]
     fn rtt_sequence_exact_sent_tracking() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT {
-            index: 9,
-            rtt: Duration::from_micros(50),
-        });
+        seq.record(Duration::from_micros(50));
         seq.set_total_sent(10);
         assert_eq!(seq.sent, 10);
         assert_eq!(seq.received, 1);
@@ -338,8 +394,8 @@ mod tests {
     #[test]
     fn rtt_sequence_loss_partial() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(1) });
-        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(2) });
+        seq.record(Duration::from_micros(1));
+        seq.record(Duration::from_micros(2));
         seq.set_total_sent(4);
         let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
         assert!((loss_pct - 50.0).abs() < f64::EPSILON);
@@ -356,8 +412,8 @@ mod tests {
     #[test]
     fn rtt_sequence_print_stats_happy_path() {
         let mut seq = RttSequence::new();
-        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(100) });
-        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(200) });
+        seq.record(Duration::from_micros(100));
+        seq.record(Duration::from_micros(200));
         seq.set_total_sent(2);
         seq.print_stats();
     }

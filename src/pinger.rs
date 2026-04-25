@@ -1,38 +1,38 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Request {
-    pub(crate) id: u64,
-    pub(crate) request_size: Option<u16>,
-    pub(crate) response_size: Option<u16>,
+pub struct Request {
+    pub id: u64,
+    pub request_size: Option<u16>,
+    pub response_size: Option<u16>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Response {
-    pub(crate) id: u64,
-    pub(crate) timestamp: Instant,
+pub struct Response {
+    pub id: u64,
+    pub timestamp: Instant,
 }
 
-pub(crate) struct Entry {
-    pub(crate) id: u64,
-    pub(crate) ts: Instant,
+pub struct Entry {
+    pub id: u64,
+    pub ts: Instant,
 }
 
-pub(crate) enum StatEntry {
+pub enum StatEntry {
     Open(Entry),
     Close(Entry),
 }
 
-pub(crate) enum SendMode {
+pub enum SendMode {
     Adaptive(mpsc::Receiver<()>),
     Interval(u64),
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Echo {
+pub struct Echo {
     pub id: u64,
     pub len: u16,
     pub resp_size: u16,
@@ -42,7 +42,7 @@ pub const PING_HDR_LEN: usize = std::mem::size_of::<u64>()
     + std::mem::size_of::<u16>()
     + std::mem::size_of::<u16>();
 
-pub(crate) async fn generator(
+pub async fn generator(
     to_tx_transport: mpsc::Sender<Request>,
     mut send_mode: SendMode,
     ping_number: Option<u64>,

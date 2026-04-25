@@ -2,21 +2,67 @@
 
 ## Project overview
 
-`rup` is a universal pinger — a client-server tool that measures RTT over UDP,
-TCP, and ICMP. Written in Rust (edition 2024) with tokio async runtime.
+`rup` is a universal pinger library and CLI tool — measures RTT over UDP, TCP,
+and ICMP. Written in Rust (edition 2024) with tokio async runtime.
+
+The project is a single crate with two targets:
+- **Library** (`src/lib.rs`) — re-exports all public API: `Transport` trait,
+  transport implementations, core types, `Pinger` high-level API, and all
+  building blocks (`transmitter`/`receiver` adapters, `generator`, `statista`).
+- **Binary** (`src/main.rs` + `src/cli.rs`) — CLI wrapper built on the library.
 
 ## Source map
 
-| File | Purpose |
-|------|---------|
-| `src/main.rs` | Entry point, wires tasks, DNS resolution, protocol dispatch |
-| `src/cli.rs` | CLAP argument definitions and parsing |
-| `src/pinger.rs` | Domain types (`Request`, `Response`, `Entry`, `StatEntry`, `Echo`, `SendMode`) + generator task |
-| `src/statistics.rs` | RTT matching, timeout watchers, presenter, RttSequence stats |
-| `src/transport/mod.rs` | `Transport` trait + `transmitter()`/`receiver()` adapter functions |
-| `src/transport/async_udp.rs` | `UdpClientTransport` + UDP echo server |
-| `src/transport/async_tcp.rs` | `TcpClientTransport` + TCP echo server |
-| `src/transport/async_icmp.rs` | `IcmpClientTransport` (Linux ping socket, no root needed) |
+| File | Target | Purpose |
+|------|--------|---------|
+| `src/lib.rs` | lib | Module declarations, re-exports, `Pinger`/`PingReport` high-level API, `has_port`/`ensure_port` helpers |
+| `src/main.rs` | bin | Entry point, task wiring, DNS resolution, protocol dispatch |
+| `src/cli.rs` | bin | CLAP argument definitions and parsing |
+| `src/pinger.rs` | lib | Domain types (`Request`, `Response`, `Entry`, `StatEntry`, `Echo`, `SendMode`) + `generator` task |
+| `src/statistics.rs` | lib | `statista`/`statista_with_collector`, timeout watchers, `RttSequence` stats |
+| `src/transport/mod.rs` | lib | `Transport` trait + `transmitter()`/`receiver()` adapter functions |
+| `src/transport/async_udp.rs` | lib | `UdpClientTransport` + UDP echo server |
+| `src/transport/async_tcp.rs` | lib | `TcpClientTransport` + TCP echo server |
+| `src/transport/async_icmp.rs` | lib | `IcmpClientTransport` (Linux ping socket, no root needed) |
+
+## Library public API
+
+External consumers add `rup` as a dependency:
+
+```toml
+[dependencies]
+rup = { git = "https://github.com/svart/rup" }
+```
+
+### High-level API (easiest integration)
+
+```rust
+use rup::Pinger;
+
+let report = Pinger::new("127.0.0.1:5000", "udp")
+    .count(5)
+    .interval(1000)
+    .run()
+    .await?;
+
+println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max());
+```
+
+### Raw building blocks (custom pipelines)
+
+All core types are publicly accessible:
+
+- `rup::Transport` trait — implement for custom protocols
+- `rup::UdpClientTransport`, `rup::TcpClientTransport`, `rup::IcmpClientTransport`
+- `rup::transmitter()`, `rup::receiver()` — adapter functions for Transport
+- `rup::generator()` — produces `Request` messages
+- `rup::statista()` / `rup::statista_with_collector()` — RTT matching
+- `rup::Request`, `rup::Response`, `rup::Entry`, `rup::StatEntry`, `rup::SendMode`
+- `rup::Echo`, `rup::PING_HDR_LEN` — wire protocol types
+- `rup::RttSequence` — compute min/med/avg/std_dev statistics
+- `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
+- `rup::PingResult` — individual RTT measurement `{seq: u64, rtt: Duration}`
+- `rup::has_port()`, `rup::ensure_port()` — address helpers
 
 ## Architecture
 
@@ -48,9 +94,9 @@ generator ──Request──> transmitter ──StatEntry::Open──> statista
 ### Transport trait
 
 ```rust
-pub(crate) trait Transport {
-    async fn send(self: &Self, req: &Request) -> io::Result<Instant>;
-    async fn recv(self: &Self) -> io::Result<Response>;
+pub trait Transport: Send + Sync {
+    async fn send(&self, req: &Request) -> io::Result<Instant>;
+    async fn recv(&self) -> io::Result<Response>;
 }
 ```
 
@@ -60,6 +106,12 @@ to implement this trait.
 
 Transport types must be `Clone` (they use `Arc` internally) since `transmitter`
 and `receiver` run as separate tasks sharing the same transport.
+
+To add a new protocol:
+1. Create a new file `src/transport/async_<proto>.rs`
+2. Implement `Transport` for your struct
+3. Add `pub mod async_<proto>;` in `transport/mod.rs`
+4. Register in `Pinger` (lib.rs) and `main.rs` for CLI support
 
 ## Key patterns
 
@@ -111,8 +163,8 @@ variable-length responses.
 
 ```sh
 cargo build                # debug build
-cargo build --release      # release build (test with this)
-cargo test                 # 14 unit tests
+cargo build --release      # release build
+cargo test                 # 137+ unit tests (lib + bin)
 cargo clippy               # must pass before committing (zero warnings)
 ```
 

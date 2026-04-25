@@ -16,7 +16,7 @@ fn is_ipv6(addr: &SocketAddr) -> bool {
     matches!(addr, SocketAddr::V6(_))
 }
 
-pub(crate) fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
+pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
     let r = Echo {
         id: req.id,
         len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -49,7 +49,7 @@ pub(crate) fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8
     Ok(packet)
 }
 
-pub(crate) fn try_parse_icmp_response(
+pub fn try_parse_icmp_response(
     buf: &[u8],
     n: usize,
     reply_type: u8,
@@ -71,13 +71,13 @@ pub(crate) fn try_parse_icmp_response(
 }
 
 #[derive(Clone)]
-pub(crate) struct IcmpClientTransport {
+pub struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
     remote: SocketAddr,
 }
 
 impl IcmpClientTransport {
-    pub(crate) async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
+    pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
         let (domain, protocol) = if is_ipv6(&remote) {
             (Domain::IPV6, Protocol::ICMPV6)
         } else {

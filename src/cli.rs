@@ -2,7 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::pinger::PING_HDR_LEN;
+use rup::pinger::PING_HDR_LEN;
 
 fn cli() -> Command {
     Command::new("rup")

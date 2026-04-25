@@ -225,3 +225,173 @@ impl Transport for TcpClientTransport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn tcp_transport_send_and_receive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(server_addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let transport = TcpClientTransport::new(client_stream);
+
+        let server_handle = tokio::spawn(async move {
+            let mut hdr = [0; PING_HDR_LEN];
+            server_stream.read_exact(&mut hdr).await.unwrap();
+            let _ = server_stream.write_all(&hdr).await;
+        });
+
+        let req = Request {
+            id: 42,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 42);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_send_with_padding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(server_addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let transport = TcpClientTransport::new(client_stream);
+
+        let server_handle = tokio::spawn(async move {
+            let mut hdr = [0; PING_HDR_LEN];
+            server_stream.read_exact(&mut hdr).await.unwrap();
+            let echo: Echo = bincode::deserialize(&hdr).unwrap();
+            let remaining = echo.len as usize - PING_HDR_LEN;
+            if remaining > 0 {
+                let mut extra = vec![0; remaining];
+                server_stream.read_exact(&mut extra).await.unwrap();
+            }
+            let mut send_buf = hdr.to_vec();
+            send_buf.resize(echo.len as usize, 0);
+            let _ = server_stream.write_all(&send_buf).await;
+        });
+
+        let req = Request {
+            id: 99,
+            request_size: Some(64),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 99);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_recv_connection_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(server_addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let transport = TcpClientTransport::new(client_stream);
+
+        let server_handle = tokio::spawn(async move {
+            let mut hdr = [0; PING_HDR_LEN];
+            server_stream.read_exact(&mut hdr).await.unwrap();
+            drop(server_stream);
+        });
+
+        let req = Request {
+            id: 0,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+        let result = transport.recv().await;
+        assert!(result.is_err());
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_transport_send_large_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(server_addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let transport = TcpClientTransport::new(client_stream);
+
+        let server_handle = tokio::spawn(async move {
+            let mut hdr = [0; PING_HDR_LEN];
+            server_stream.read_exact(&mut hdr).await.unwrap();
+            let echo: Echo = bincode::deserialize(&hdr).unwrap();
+            let remaining = echo.len as usize - PING_HDR_LEN;
+            if remaining > 0 {
+                let mut extra = vec![0; remaining];
+                server_stream.read_exact(&mut extra).await.unwrap();
+            }
+            let mut send_buf = hdr.to_vec();
+            send_buf.resize(echo.len as usize, 0);
+            let _ = server_stream.write_all(&send_buf).await;
+        });
+
+        let req = Request {
+            id: 7,
+            request_size: Some(512),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 7);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_echo_server_response_respects_resp_size() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let client_stream = TcpStream::connect(server_addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let transport = TcpClientTransport::new(client_stream);
+
+        let server_handle = tokio::spawn(async move {
+            let mut hdr = [0; PING_HDR_LEN];
+            server_stream.read_exact(&mut hdr).await.unwrap();
+            let echo: Echo = bincode::deserialize(&hdr).unwrap();
+            let remaining = echo.len as usize - PING_HDR_LEN;
+            if remaining > 0 {
+                let mut extra = vec![0; remaining];
+                server_stream.read_exact(&mut extra).await.unwrap();
+            }
+            let mut send_buf = hdr.to_vec();
+            send_buf.resize(echo.len as usize, 0);
+            let _ = server_stream.write_all(&send_buf).await;
+        });
+
+        let req = Request {
+            id: 5,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: Some(32),
+        };
+        transport.send(&req).await.unwrap();
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 5);
+
+        server_handle.await.unwrap();
+    }
+}

@@ -6,6 +6,8 @@ use tokio::task::JoinHandle;
 
 use crate::cli::CliParams::{PingerParams, ServerParams};
 use pinger::{Request, SendMode, StatEntry};
+#[cfg(test)]
+use pinger::Response;
 
 mod transport;
 mod cli;
@@ -18,8 +20,8 @@ use transport::async_udp::UdpClientTransport;
 use transport::Transport;
 use transport::{receiver, transmitter};
 
-fn ensure_port(addr: &str, protocol: &str) -> String {
-    let has_port = if addr.starts_with('[') {
+fn has_port(addr: &str) -> bool {
+    if addr.starts_with('[') {
         let after_bracket = addr.split(']').nth(1).unwrap_or("");
         after_bracket.starts_with(':')
     } else {
@@ -31,9 +33,11 @@ fn ensure_port(addr: &str, protocol: &str) -> String {
             }
             None => false,
         }
-    };
+    }
+}
 
-    if has_port {
+fn ensure_port(addr: &str, protocol: &str) -> String {
+    if has_port(addr) {
         return addr.to_string();
     }
     if protocol == "icmp" {
@@ -213,5 +217,127 @@ fn main() {
                 let _ = server.await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::time::Instant;
+    use transport::Transport;
+
+    struct NoopTransport;
+
+    impl Clone for NoopTransport {
+        fn clone(&self) -> Self { NoopTransport }
+    }
+
+    impl Transport for NoopTransport {
+        async fn send(&self, _: &Request) -> io::Result<Instant> {
+            Ok(Instant::now())
+        }
+        async fn recv(&self) -> io::Result<Response> {
+            Err(io::Error::new(io::ErrorKind::Other, "noop"))
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_tasks_wires_transmitter_and_receiver() {
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let (stat_tx, _stat_rx) = mpsc::channel(8);
+
+        let (tx_h, rx_h) = spawn_tasks(NoopTransport, req_rx, stat_tx);
+
+        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+        drop(req_tx);
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), tx_h).await;
+        rx_h.abort();
+    }
+
+    #[test]
+    fn has_port_detects_v4_with_port() {
+        assert!(has_port("127.0.0.1:5000"));
+    }
+
+    #[test]
+    fn has_port_detects_v4_without_port() {
+        assert!(!has_port("127.0.0.1"));
+    }
+
+    #[test]
+    fn has_port_detects_v6_with_port() {
+        assert!(has_port("[::1]:5000"));
+    }
+
+    #[test]
+    fn has_port_detects_v6_without_port() {
+        assert!(!has_port("[::1]"));
+    }
+
+    #[test]
+    fn has_port_detects_hostname_with_port() {
+        assert!(has_port("localhost:8080"));
+    }
+
+    #[test]
+    fn has_port_detects_hostname_without_port() {
+        assert!(!has_port("localhost"));
+    }
+
+    #[test]
+    fn has_port_empty_after_colon() {
+        assert!(!has_port("127.0.0.1:"));
+    }
+
+    #[test]
+    fn has_port_non_numeric_after_colon() {
+        assert!(!has_port("127.0.0.1:abc"));
+    }
+
+    #[test]
+    fn has_port_multiple_colons_ipv6() {
+        assert!(has_port("[2001:db8::1]:8080"));
+    }
+
+    #[test]
+    fn has_port_multiple_colons_no_port() {
+        assert!(!has_port("[2001:db8::1]"));
+    }
+
+    #[test]
+    fn has_port_empty_string() {
+        assert!(!has_port(""));
+    }
+
+    #[test]
+    fn has_port_just_port_number() {
+        assert!(has_port(":5000"));
+    }
+
+    #[test]
+    fn ensure_port_keeps_existing_v4() {
+        assert_eq!(ensure_port("10.0.0.1:9999", "udp"), "10.0.0.1:9999");
+    }
+
+    #[test]
+    fn ensure_port_keeps_existing_v6() {
+        assert_eq!(ensure_port("[::1]:443", "tcp"), "[::1]:443");
+    }
+
+    #[test]
+    fn ensure_port_adds_zero_for_icmp_v4() {
+        assert_eq!(ensure_port("192.168.1.1", "icmp"), "192.168.1.1:0");
+    }
+
+    #[test]
+    fn ensure_port_adds_zero_for_icmp_v6() {
+        assert_eq!(ensure_port("[::1]", "icmp"), "[::1]:0");
+    }
+
+    #[test]
+    fn ensure_port_adds_zero_for_icmp_hostname() {
+        assert_eq!(ensure_port("localhost", "icmp"), "localhost:0");
     }
 }

@@ -141,3 +141,115 @@ impl Transport for UdpClientTransport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pinger::Request;
+
+    #[tokio::test]
+    async fn udp_transport_send_and_receive() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let transport = UdpClientTransport::new(
+            "0.0.0.0:0".parse().unwrap(),
+            server_addr,
+        )
+        .await
+        .unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            let mut buf = vec![0; PING_HDR_LEN + 100];
+            let (n, client_addr) = server_sock.recv_from(&mut buf).await.unwrap();
+            let _ = server_sock.send_to(&buf[..n], client_addr).await;
+        });
+
+        let req = Request {
+            id: 7,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 7);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_transport_recv_short_packet_error() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let transport = UdpClientTransport::new(
+            "0.0.0.0:0".parse().unwrap(),
+            server_addr,
+        )
+        .await
+        .unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            let mut buf = vec![0; PING_HDR_LEN + 100];
+            let (_n, client_addr) = server_sock.recv_from(&mut buf).await.unwrap();
+            let short = &buf[..4];
+            let _ = server_sock.send_to(short, client_addr).await;
+        });
+
+        let req = Request {
+            id: 1,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+
+        let result = transport.recv().await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_transport_send_with_padding() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let transport = UdpClientTransport::new(
+            "0.0.0.0:0".parse().unwrap(),
+            server_addr,
+        )
+        .await
+        .unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            let mut buf = vec![0; 512];
+            let (n, client_addr) = server_sock.recv_from(&mut buf).await.unwrap();
+            assert!(n >= 100, "expected padded request >= 100 bytes, got {n}");
+            let _ = server_sock.send_to(&buf[..n], client_addr).await;
+        });
+
+        let req = Request {
+            id: 2,
+            request_size: Some(100),
+            response_size: None,
+        };
+        transport.send(&req).await.unwrap();
+
+        let resp = transport.recv().await.unwrap();
+        assert_eq!(resp.id, 2);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_transport_new_bind_failure() {
+        let result = UdpClientTransport::new(
+            "1.2.3.4:9999".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+}

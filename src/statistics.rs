@@ -213,6 +213,7 @@ impl RttSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn rtt_sequence_mean() {
@@ -224,6 +225,84 @@ mod tests {
             });
         }
         assert_eq!(seq.mean(), Duration::from_micros(250));
+    }
+
+    #[test]
+    fn rtt_sequence_mean_single_entry() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(42) });
+        assert_eq!(seq.mean(), Duration::from_micros(42));
+    }
+
+    #[test]
+    fn rtt_sequence_mean_large_values() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_secs(10) });
+        seq.record(PingRTT { index: 1, rtt: Duration::from_secs(20) });
+        assert_eq!(seq.mean(), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn rtt_sequence_median_odd() {
+        let mut seq = RttSequence::new();
+        for i in 0..5 {
+            seq.record(PingRTT { index: i, rtt: Duration::from_micros((i as u64 + 1) * 10) });
+        }
+        seq.set_total_sent(5);
+        seq.rtts.sort();
+        assert_eq!(seq.rtts[seq.rtts.len() / 2], Duration::from_micros(30));
+    }
+
+    #[test]
+    fn rtt_sequence_median_even() {
+        let mut seq = RttSequence::new();
+        for i in 0..4 {
+            seq.record(PingRTT { index: i, rtt: Duration::from_micros((i as u64 + 1) * 10) });
+        }
+        seq.set_total_sent(4);
+        seq.rtts.sort();
+        assert_eq!(seq.rtts[seq.rtts.len() / 2], Duration::from_micros(30));
+    }
+
+    #[test]
+    fn rtt_sequence_single_entry() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(100) });
+        seq.set_total_sent(1);
+        seq.rtts.sort();
+        assert_eq!(seq.rtts.len(), 1);
+        assert_eq!(seq.rtts[0], Duration::from_micros(100));
+        assert_eq!(seq.sent, 1);
+        assert_eq!(seq.received, 1);
+    }
+
+    #[test]
+    fn rtt_sequence_large_dataset() {
+        let mut seq = RttSequence::new();
+        for i in 0..1000 {
+            seq.record(PingRTT { index: i as u64, rtt: Duration::from_nanos(i) });
+        }
+        seq.set_total_sent(1000);
+        assert_eq!(seq.received, 1000);
+        assert!(!seq.rtts.is_empty());
+    }
+
+    #[test]
+    fn rtt_sequence_std_dev_zero() {
+        let mut seq = RttSequence::new();
+        for i in 0..3 {
+            seq.record(PingRTT { index: i, rtt: Duration::from_micros(100) });
+        }
+        assert_eq!(seq.std_deviation(), Duration::from_nanos(0));
+    }
+
+    #[test]
+    fn rtt_sequence_std_dev_known() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(0) });
+        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(100) });
+        let std_dev = seq.std_deviation();
+        assert!(std_dev.as_micros() > 0);
     }
 
     #[test]
@@ -245,6 +324,45 @@ mod tests {
     }
 
     #[test]
+    fn rtt_sequence_loss_no_sent() {
+        let mut seq = RttSequence::new();
+        seq.set_total_sent(0);
+        let loss_pct = if seq.sent > 0 {
+            (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0
+        } else {
+            0.0
+        };
+        assert_eq!(loss_pct, 0.0);
+    }
+
+    #[test]
+    fn rtt_sequence_loss_partial() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(1) });
+        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(2) });
+        seq.set_total_sent(4);
+        let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
+        assert!((loss_pct - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rtt_sequence_full_loss() {
+        let mut seq = RttSequence::new();
+        seq.set_total_sent(5);
+        let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
+        assert!((loss_pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rtt_sequence_print_stats_happy_path() {
+        let mut seq = RttSequence::new();
+        seq.record(PingRTT { index: 0, rtt: Duration::from_micros(100) });
+        seq.record(PingRTT { index: 1, rtt: Duration::from_micros(200) });
+        seq.set_total_sent(2);
+        seq.print_stats();
+    }
+
+    #[test]
     fn fmt_duration_micros() {
         let s = fmt_duration(Duration::from_micros(50));
         assert!(s.contains("µs"));
@@ -260,5 +378,183 @@ mod tests {
     fn fmt_duration_secs() {
         let s = fmt_duration(Duration::from_secs(2));
         assert!(s.contains("s"));
+    }
+
+    #[test]
+    fn fmt_duration_exact_boundaries() {
+        assert!(fmt_duration(Duration::from_millis(1)).contains("ms"));
+        assert!(fmt_duration(Duration::from_secs(1)).contains("s"));
+        assert!(fmt_duration(Duration::from_micros(999)).contains("µs"));
+        assert!(fmt_duration(Duration::from_millis(999)).contains("ms"));
+    }
+
+    #[test]
+    fn fmt_duration_zero() {
+        let s = fmt_duration(Duration::from_nanos(0));
+        assert!(s.contains("µs"));
+    }
+
+    #[test]
+    fn entry_matching_exact_order() {
+        let mut requests = VecDeque::new();
+        let ts = Instant::now();
+        requests.push_back(Entry { id: 0, ts });
+        requests.push_back(Entry { id: 1, ts });
+
+        let mut matched = Vec::new();
+
+        let idx = 0;
+        while let Some(req) = requests.pop_front() {
+            match idx.cmp(&req.id) {
+                Ordering::Greater => continue,
+                Ordering::Equal => matched.push(idx),
+                Ordering::Less => { requests.push_front(req); }
+            }
+            break;
+        }
+        assert_eq!(matched, vec![0]);
+
+        let idx = 1;
+        while let Some(req) = requests.pop_front() {
+            match idx.cmp(&req.id) {
+                Ordering::Greater => continue,
+                Ordering::Equal => matched.push(idx),
+                Ordering::Less => { requests.push_front(req); }
+            }
+            break;
+        }
+        assert_eq!(matched, vec![0, 1]);
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn entry_matching_less_puts_back() {
+        let mut requests = VecDeque::new();
+        let ts = Instant::now();
+        requests.push_back(Entry { id: 5, ts });
+
+        let idx = 3;
+        while let Some(req) = requests.pop_front() {
+            match idx.cmp(&req.id) {
+                Ordering::Greater => continue,
+                Ordering::Equal => {}
+                Ordering::Less => { requests.push_front(req); }
+            }
+            break;
+        }
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, 5);
+    }
+
+    #[test]
+    fn entry_matching_skips_lost_entries() {
+        let mut requests = VecDeque::new();
+        let ts = Instant::now();
+        requests.push_back(Entry { id: 0, ts });
+        requests.push_back(Entry { id: 1, ts });
+        requests.push_back(Entry { id: 2, ts });
+
+        let idx = 2;
+        let mut skipped = Vec::new();
+        loop {
+            match requests.pop_front() {
+                Some(req) => match idx.cmp(&req.id) {
+                    Ordering::Greater => { skipped.push(req.id); continue; }
+                    Ordering::Equal => { break; }
+                    Ordering::Less => { requests.push_front(req); break; }
+                },
+                None => break,
+            }
+        }
+        assert_eq!(skipped, vec![0, 1]);
+    }
+
+    #[test]
+    fn entry_matching_empty_queue() {
+        let mut requests: VecDeque<Entry> = VecDeque::new();
+        let _idx = 42u64;
+        let result = requests.pop_front();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn entry_matching_idempotent() {
+        let mut requests = VecDeque::new();
+        let ts = Instant::now();
+        requests.push_back(Entry { id: 5, ts });
+
+        let idx = 5;
+        while let Some(req) = requests.pop_front() {
+            match idx.cmp(&req.id) {
+                Ordering::Greater => continue,
+                Ordering::Equal => {}
+                Ordering::Less => { requests.push_front(req); }
+            }
+            break;
+        }
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_timeout_removes_entry() {
+        let entry = Entry { id: 42, ts: Instant::now() };
+        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
+
+        receive_timeout(42, req_mutex.clone(), Duration::from_millis(1), None).await;
+
+        let requests = req_mutex.lock().await;
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_timeout_removes_older_entries() {
+        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
+            Entry { id: 0, ts: Instant::now() },
+            Entry { id: 1, ts: Instant::now() },
+            Entry { id: 2, ts: Instant::now() },
+        ])));
+
+        receive_timeout(1, req_mutex.clone(), Duration::from_millis(1), None).await;
+
+        let requests = req_mutex.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, 2);
+    }
+
+    #[tokio::test]
+    async fn receive_timeout_removes_entries_up_to_index() {
+        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
+            Entry { id: 3, ts: Instant::now() },
+            Entry { id: 7, ts: Instant::now() },
+        ])));
+
+        receive_timeout(5, req_mutex.clone(), Duration::from_millis(1), None).await;
+
+        let requests = req_mutex.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, 7);
+    }
+
+    #[tokio::test]
+    async fn receive_timeout_signals_generator() {
+        let entry = Entry { id: 0, ts: Instant::now() };
+        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
+        let (gen_tx, mut gen_rx) = mpsc::channel(8);
+
+        receive_timeout(0, req_mutex.clone(), Duration::from_millis(1), Some(gen_tx)).await;
+
+        let signal = tokio::time::timeout(Duration::from_millis(100), gen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal, ());
+    }
+
+    #[tokio::test]
+    async fn receive_timeout_empty_queue_no_panic() {
+        let req_mutex = Arc::new(Mutex::new(VecDeque::new()));
+        receive_timeout(0, req_mutex.clone(), Duration::from_millis(1), None).await;
+        let requests = req_mutex.lock().await;
+        assert!(requests.is_empty());
     }
 }

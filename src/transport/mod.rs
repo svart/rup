@@ -133,6 +133,152 @@ mod tests {
         .await
         .unwrap();
     }
+
+    #[tokio::test]
+    async fn transmitter_multiple_requests_in_order() {
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let (stat_tx, mut stat_rx) = mpsc::channel(8);
+        let transport = MockTransport::new(vec![]);
+
+        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+        req_tx.send(Request { id: 1, request_size: None, response_size: None }).await.unwrap();
+        req_tx.send(Request { id: 2, request_size: None, response_size: None }).await.unwrap();
+        drop(req_tx);
+
+        transmitter(transport, req_rx, stat_tx).await;
+
+        let mut ids = Vec::new();
+        while let Some(entry) = stat_rx.recv().await {
+            match entry {
+                StatEntry::Open(e) => ids.push(e.id),
+                _ => {}
+            }
+        }
+        assert_eq!(ids, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn transmitter_passes_request_sizes() {
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let (stat_tx, mut stat_rx) = mpsc::channel(8);
+        let transport = MockTransport::new(vec![]);
+
+        req_tx.send(Request {
+            id: 10,
+            request_size: Some(64),
+            response_size: Some(128),
+        }).await.unwrap();
+        drop(req_tx);
+
+        transmitter(transport, req_rx, stat_tx).await;
+
+        let entry = stat_rx.recv().await.unwrap();
+        match entry {
+            StatEntry::Open(e) => assert_eq!(e.id, 10),
+            _ => panic!("expected Open"),
+        }
+    }
+
+    struct ErrorTransport;
+
+    impl Clone for ErrorTransport {
+        fn clone(&self) -> Self { ErrorTransport }
+    }
+
+    impl Transport for ErrorTransport {
+        async fn send(&self, _req: &Request) -> io::Result<Instant> {
+            Err(io::Error::new(io::ErrorKind::Other, "send error"))
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            Err(io::Error::new(io::ErrorKind::Other, "recv error"))
+        }
+    }
+
+    #[tokio::test]
+    async fn transmitter_send_error_breaks_loop() {
+        let (req_tx, req_rx) = mpsc::channel(8);
+        let (stat_tx, _stat_rx) = mpsc::channel(8);
+        let transport = ErrorTransport;
+
+        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            transmitter(transport, req_rx, stat_tx),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_exits_on_stat_channel_close() {
+        let (stat_tx, mut stat_rx) = mpsc::channel(8);
+        let transport = MockTransport::new(vec![
+            Response { id: 0, timestamp: Instant::now() },
+        ]);
+
+        let handle = tokio::spawn(receiver(transport, stat_tx));
+
+        let _ = stat_rx.recv().await;
+        drop(stat_rx);
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_recv_error_breaks_loop() {
+        let (stat_tx, _stat_rx) = mpsc::channel(8);
+        let transport = ErrorTransport;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            receiver(transport, stat_tx),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_multiple_responses_in_order() {
+        let (stat_tx, mut stat_rx) = mpsc::channel(8);
+        let transport = MockTransport::new(vec![
+            Response { id: 0, timestamp: Instant::now() },
+            Response { id: 1, timestamp: Instant::now() },
+            Response { id: 2, timestamp: Instant::now() },
+        ]);
+
+        let handle = tokio::spawn(receiver(transport, stat_tx));
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), stat_rx.recv()).await {
+                Ok(Some(StatEntry::Close(e))) => ids.push(e.id),
+                _ => break,
+            }
+        }
+        assert_eq!(ids, vec![0, 1, 2]);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn transmitter_stat_channel_full_backpressure() {
+        let (req_tx, req_rx) = mpsc::channel(1);
+        let (stat_tx, _stat_rx) = mpsc::channel(1);
+        let transport = MockTransport::new(vec![]);
+
+        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+        drop(req_tx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            transmitter(transport, req_rx, stat_tx),
+        )
+        .await
+        .unwrap();
+    }
 }
 
 pub(crate) mod async_udp;

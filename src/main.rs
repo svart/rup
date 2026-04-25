@@ -17,6 +17,28 @@ use transport::async_udp::UdpClientTransport;
 use transport::{transmitter, receiver};
 use pinger::Request;
 
+fn ensure_port(addr: &str, protocol: &str) -> String {
+    let has_port = if addr.starts_with('[') {
+        let after_bracket = addr.split(']').nth(1).unwrap_or("");
+        after_bracket.starts_with(':')
+    } else {
+        let last_colon = addr.rfind(':');
+        match last_colon {
+            Some(i) => {
+                let after = &addr[i + 1..];
+                !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
+            }
+            None => false,
+        }
+    };
+
+    if has_port || protocol != "icmp" {
+        addr.to_string()
+    } else {
+        format!("{addr}:0")
+    }
+}
+
 fn main() {
     let cli_params = cli::get_cli_params();
 
@@ -44,7 +66,8 @@ fn main() {
             };
 
             rt.block_on(async {
-                let remote_addr = match tokio::net::lookup_host(&params.remote_address).await {
+                let addr = ensure_port(&params.remote_address, &params.protocol);
+                let remote_addr = match tokio::net::lookup_host(&addr).await {
                     Ok(mut addrs) => match addrs.next() {
                         Some(a) => a,
                         None => {
@@ -53,7 +76,7 @@ fn main() {
                         }
                     },
                     Err(e) => {
-                        eprintln!("failed to resolve {}: {}", params.remote_address, e);
+                        eprintln!("failed to resolve '{}': {}", params.remote_address, e);
                         return;
                     }
                 };

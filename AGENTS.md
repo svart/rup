@@ -112,8 +112,8 @@ variable-length responses.
 ```sh
 cargo build                # debug build
 cargo build --release      # release build (test with this)
-cargo test                 # 11 unit tests
-cargo clippy               # (optional, no clippy config)
+cargo test                 # 14 unit tests
+cargo clippy               # must pass before committing (zero warnings)
 ```
 
 ## Testing manually
@@ -137,8 +137,5 @@ cargo run --release -- -p tcp client 127.0.0.1:5000
 - `statista` exits immediately when receiver is aborted — timeout watchers may
   fire after presenter has already printed final stats (cosmetic, unused entries
   are silently dropped)
-- No IPv6 support for ICMP (only `IPPROTO_ICMPV4`)
 - No jitter/mean deviation in statistics (only std_dev)
-- UDP/TCP servers have no signal handling (no graceful shutdown on SIGINT)
 - `Response.size` field was removed; packet size statistics not tracked
-- Hardcoded ICMP identifier placeholder `0x0000` (kernel overrides it anyway)

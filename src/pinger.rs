@@ -38,8 +38,7 @@ pub(crate) struct Echo {
     pub resp_size: u16,
 }
 
-pub const PING_HDR_LEN: usize = 0
-    + std::mem::size_of::<u64>()
+pub const PING_HDR_LEN: usize = std::mem::size_of::<u64>()
     + std::mem::size_of::<u16>()
     + std::mem::size_of::<u16>();
 
@@ -59,10 +58,8 @@ pub(crate) async fn generator(
     tokio::pin!(run_time);
 
     loop {
-        if let Some(n) = ping_number {
-            if id >= n {
-                break;
-            }
+        if let Some(n) = ping_number && id >= n {
+            break;
         }
 
         let req = Request {

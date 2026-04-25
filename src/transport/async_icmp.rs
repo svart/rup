@@ -57,7 +57,7 @@ impl IcmpClientTransport {
 }
 
 impl Transport for IcmpClientTransport {
-    async fn send(self: &Self, req: &Request) -> io::Result<Instant> {
+    async fn send(&self, req: &Request) -> io::Result<Instant> {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -92,7 +92,7 @@ impl Transport for IcmpClientTransport {
         Ok(ts)
     }
 
-    async fn recv(self: &Self) -> io::Result<Response> {
+    async fn recv(&self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
         let reply_type: u8 = if is_ipv6(&self.remote) { 129 } else { 0 };
 

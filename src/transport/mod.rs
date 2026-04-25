@@ -37,27 +37,34 @@ mod tests {
     }
 
     impl Transport for MockTransport {
-        async fn send(&self, _req: &Request) -> io::Result<Instant> {
-            tokio::time::sleep(self.send_delay).await;
-            Ok(Instant::now())
+        fn send(
+            &self,
+            _req: &Request,
+        ) -> impl std::future::Future<Output = io::Result<Instant>> + Send {
+            async {
+                tokio::time::sleep(self.send_delay).await;
+                Ok(Instant::now())
+            }
         }
 
-        async fn recv(&self) -> io::Result<Response> {
+        fn recv(&self) -> impl std::future::Future<Output = io::Result<Response>> + Send {
             let id = {
                 let mut idx = self.recv_index.lock().unwrap();
                 if *idx < self.recv_responses.len() {
-                    let r = &self.recv_responses[*idx];
+                    let id = self.recv_responses[*idx].id;
                     *idx += 1;
-                    r.id
+                    Some(id)
                 } else {
-                    return Err(io::Error::new(io::ErrorKind::Other, "no more responses"));
+                    None
                 }
             };
-            tokio::time::sleep(std::time::Duration::from_micros(1)).await;
-            Ok(Response {
-                id,
-                timestamp: Instant::now(),
-            })
+            async move {
+                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
+                match id {
+                    Some(id) => Ok(Response { id, timestamp: Instant::now() }),
+                    None => Err(io::Error::new(io::ErrorKind::Other, "no more responses")),
+                }
+            }
         }
     }
 

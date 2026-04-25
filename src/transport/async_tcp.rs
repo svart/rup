@@ -123,7 +123,7 @@ impl TcpClientTransport {
 }
 
 impl Transport for TcpClientTransport {
-    async fn send(self: &Self, req: &Request) -> io::Result<Instant> {
+    async fn send(&self, req: &Request) -> io::Result<Instant> {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -155,7 +155,7 @@ impl Transport for TcpClientTransport {
         Ok(Instant::now())
     }
 
-    async fn recv(self: &Self) -> io::Result<Response> {
+    async fn recv(&self) -> io::Result<Response> {
         let mut hdr = [0; PING_HDR_LEN];
         let mut offset = 0;
         while offset < PING_HDR_LEN {

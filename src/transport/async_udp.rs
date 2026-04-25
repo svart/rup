@@ -98,7 +98,7 @@ impl UdpClientTransport {
 }
 
 impl Transport for UdpClientTransport {
-    async fn send(self: &Self, req: &Request) -> io::Result<Instant> {
+    async fn send(&self, req: &Request) -> io::Result<Instant> {
         let r = Echo {
             id: req.id,
             len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -118,7 +118,7 @@ impl Transport for UdpClientTransport {
         Ok(timestamp)
     }
 
-    async fn recv(self: &Self) -> io::Result<Response> {
+    async fn recv(&self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
         let n = self.socket.recv(&mut buf).await?;
 

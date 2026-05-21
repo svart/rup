@@ -4,10 +4,10 @@ The client path is an actor-style Tokio pipeline:
 
 ```text
 generator --Request--> transmitter --StatEntry::Open--> statista --PingResult--> presenter/collector
-                         |                                      ^
-                    send()|                                recv()|
-                         v                                      |
-                    Transport ---------------- StatEntry::Close --
+                         |                                  ^
+                   send()|                            recv()|
+                         v                                  |
+                    Transport ----------- StatEntry::Close --
 ```
 
 ## Pipeline

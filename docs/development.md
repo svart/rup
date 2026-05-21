@@ -1,7 +1,7 @@
 # Development Guide
 
-`rup` is a single Rust crate with a library target and a CLI target.
-Most behavior lives in the library; `src/main.rs` is intentionally thin.
+`rup` is a single Rust crate with a library target and a CLI target. Most
+behavior lives in the library; `src/main.rs` is intentionally thin.
 
 ## Source Map
 
@@ -19,65 +19,6 @@ Most behavior lives in the library; `src/main.rs` is intentionally thin.
 | `src/cli.rs` | Clap command definition and CLI parameter extraction |
 | `src/main.rs` | Runtime setup and calls into library entry points |
 
-## Architecture
-
-The client pipeline is actor-like. Each stage communicates over Tokio channels:
-
-```text
-generator -> transmitter -> statista -> presenter or collector
-                 |              ^
-                 v              |
-              Transport -> receiver
-```
-
-The transport implementations only need to implement:
-
-```rust
-pub trait Transport: Send + Sync {
-    async fn send(&self, req: &Request) -> io::Result<Instant>;
-    async fn recv(&self) -> io::Result<Response>;
-}
-```
-
-`run_ping_session()` builds the quiet library path and returns `PingReport`.
-`run_ping_session_with_output()` adds the live CLI presenter. Both paths share
-the same matcher and timeout logic.
-
-## Public API Shape
-
-The high-level API is:
-
-```rust
-let report = rup::Pinger::new("127.0.0.1:5000", "udp")
-    .count(5)
-    .run()
-    .await?;
-```
-
-The structured API is:
-
-```rust
-let mut config = rup::PingConfig::new("127.0.0.1:5000".to_string(), rup::Protocol::Udp);
-config.ping_number = Some(5);
-let report = rup::run_ping_session(config).await?;
-```
-
-The library must not terminate the process. Invalid user input should return
-`io::Result` errors from library functions and be printed by the CLI layer.
-
-## Adding A Protocol
-
-1. Add a transport implementation in `src/transport/async_<proto>.rs`.
-2. Implement `Transport` for the client transport type.
-3. Add the module to `src/transport/mod.rs`.
-4. Add a variant to `Protocol` in `src/protocol.rs`.
-5. Register client construction in `run_ping_session_inner()` in `src/lib.rs`.
-6. Register server support in `run_server()` if the protocol needs a `rup`
-   echo server.
-7. Add parser, packet, and transport tests.
-
-For protocols that share the existing echo payload, use `echo_codec`.
-
 ## Testing
 
 Tests live next to the code they exercise in `#[cfg(test)]` modules.
@@ -91,8 +32,6 @@ cargo clippy --all-targets -- -D warnings
 
 Current suite size is 143 library tests, 17 binary tests, and 1 doctest.
 
-### Test Coverage By Area
-
 | File | What the tests cover |
 |------|----------------------|
 | `src/pinger.rs` | `Echo` serialization, request generation, interval/adaptive modes, channel shutdown |
@@ -102,7 +41,7 @@ Current suite size is 143 library tests, 17 binary tests, and 1 doctest.
 | `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
 | `src/transport/async_icmp.rs` | ICMP packet assembly, checksums, response parsing, loopback ping when available |
 | `src/cli.rs` | CLI defaults, validation, protocol parsing, subcommand arguments |
-| `src/lib.rs` | Address helpers, high-level report statistics, unknown protocol errors |
+| `src/lib.rs` | Address helpers, high-level report statistics, session orchestration |
 
 Some tests bind loopback sockets. In restricted sandboxes they may fail with
 `PermissionDenied`; run them outside the sandbox when validating real socket

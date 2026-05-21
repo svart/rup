@@ -6,7 +6,8 @@ use std::time::Instant;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
-use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
+use crate::echo_codec;
+use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::transport::Transport;
 
 const ICMP_HEADER_LEN: usize = 8;
@@ -27,14 +28,17 @@ pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
     let echo_type: u8 = if is_v6 { 128 } else { 8 };
 
     let mut packet = vec![
-        echo_type, 0x00,
-        0x00, 0x00,
-        0x00, 0x00,
-        seq_bytes[0], seq_bytes[1],
+        echo_type,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        seq_bytes[0],
+        seq_bytes[1],
     ];
 
-    let payload = bincode::serialize(&r)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let payload = echo_codec::encode_echo(&r, PING_HDR_LEN)?;
 
     let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
     packet.extend_from_slice(&payload);
@@ -60,7 +64,8 @@ pub fn try_parse_icmp_response(
     if buf[0] != reply_type || buf[1] != 0x00 {
         return Ok(None);
     }
-    let echo: Echo = match bincode::deserialize(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]) {
+    let echo: Echo = match echo_codec::decode_header(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN])
+    {
         Ok(e) => e,
         Err(_) => return Ok(None),
     };
@@ -168,7 +173,11 @@ mod tests {
 
     #[test]
     fn build_icmp_v4_packet_structure() {
-        let req = Request { id: 0xABCD, request_size: Some(PING_HDR_LEN as u16), response_size: None };
+        let req = Request {
+            id: 0xABCD,
+            request_size: Some(PING_HDR_LEN as u16),
+            response_size: None,
+        };
         let packet = build_icmp_packet(&req, false).unwrap();
 
         assert_eq!(packet[0], 8, "type = echo request");
@@ -177,7 +186,8 @@ mod tests {
         assert_eq!(packet[6], 0xAB);
         assert_eq!(packet[7], 0xCD);
 
-        let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        let echo: Echo =
+            bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0xABCD);
         assert_eq!(echo.len, PING_HDR_LEN as u16);
         assert_eq!(echo.resp_size, 0);
@@ -185,7 +195,11 @@ mod tests {
 
     #[test]
     fn build_icmp_v4_checksum_valid() {
-        let req = Request { id: 1, request_size: None, response_size: None };
+        let req = Request {
+            id: 1,
+            request_size: None,
+            response_size: None,
+        };
         let packet = build_icmp_packet(&req, false).unwrap();
 
         let verify = csum16_slice(&packet);
@@ -194,7 +208,11 @@ mod tests {
 
     #[test]
     fn build_icmp_v6_no_checksum_in_packet() {
-        let req = Request { id: 1, request_size: None, response_size: None };
+        let req = Request {
+            id: 1,
+            request_size: None,
+            response_size: None,
+        };
         let packet = build_icmp_packet(&req, true).unwrap();
 
         assert_eq!(packet[0], 128, "type = echo request v6");
@@ -205,14 +223,19 @@ mod tests {
     #[test]
     fn build_icmp_packet_variable_sizes() {
         for size in [PING_HDR_LEN as u16, 64, 128, 256, 512] {
-            let req = Request { id: 10, request_size: Some(size), response_size: None };
+            let req = Request {
+                id: 10,
+                request_size: Some(size),
+                response_size: None,
+            };
             let packet = build_icmp_packet(&req, false).unwrap();
             assert_eq!(packet.len(), ICMP_HEADER_LEN + size as usize);
 
             let verify = csum16_slice(&packet);
             assert_eq!(verify, 0, "checksum valid for size={size}");
 
-            let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+            let echo: Echo =
+                bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
             assert_eq!(echo.id, 10);
             assert_eq!(echo.len, size);
         }
@@ -220,10 +243,15 @@ mod tests {
 
     #[test]
     fn build_icmp_packet_with_resp_size() {
-        let req = Request { id: 42, request_size: Some(100), response_size: Some(200) };
+        let req = Request {
+            id: 42,
+            request_size: Some(100),
+            response_size: Some(200),
+        };
         let packet = build_icmp_packet(&req, false).unwrap();
 
-        let echo: Echo = bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        let echo: Echo =
+            bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 42);
         assert_eq!(echo.len, 100);
         assert_eq!(echo.resp_size, 200);
@@ -232,7 +260,11 @@ mod tests {
 
     #[test]
     fn try_parse_icmp_matching_reply() {
-        let req = Request { id: 7, request_size: None, response_size: None };
+        let req = Request {
+            id: 7,
+            request_size: None,
+            response_size: None,
+        };
         let send_pkt = build_icmp_packet(&req, false).unwrap();
 
         let mut reply = send_pkt.clone();
@@ -245,7 +277,11 @@ mod tests {
 
     #[test]
     fn try_parse_icmp_wrong_type() {
-        let req = Request { id: 3, request_size: None, response_size: None };
+        let req = Request {
+            id: 3,
+            request_size: None,
+            response_size: None,
+        };
         let send_pkt = build_icmp_packet(&req, false).unwrap();
 
         let mut reply = send_pkt.clone();
@@ -258,7 +294,11 @@ mod tests {
 
     #[test]
     fn try_parse_icmp_wrong_code() {
-        let req = Request { id: 5, request_size: None, response_size: None };
+        let req = Request {
+            id: 5,
+            request_size: None,
+            response_size: None,
+        };
         let send_pkt = build_icmp_packet(&req, false).unwrap();
 
         let mut reply = send_pkt.clone();
@@ -293,7 +333,11 @@ mod tests {
 
     #[test]
     fn try_parse_icmp_v6_reply_type() {
-        let req = Request { id: 10, request_size: None, response_size: None };
+        let req = Request {
+            id: 10,
+            request_size: None,
+            response_size: None,
+        };
         let send_pkt = build_icmp_packet(&req, true).unwrap();
 
         let mut reply = send_pkt.clone();
@@ -384,13 +428,10 @@ mod tests {
 
         transport.send(&req).await.unwrap();
 
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            transport.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(resp.id, 100);
     }
@@ -416,13 +457,10 @@ mod tests {
 
         transport.send(&req).await.unwrap();
 
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            transport.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(resp.id, 200);
     }

@@ -5,15 +5,12 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::pinger::{Entry, Request, Response, StatEntry};
 
-pub mod async_udp;
-pub mod async_tcp;
 pub mod async_icmp;
+pub mod async_tcp;
+pub mod async_udp;
 
 pub trait Transport: Send + Sync {
-    fn send(
-        &self,
-        req: &Request,
-    ) -> impl std::future::Future<Output = io::Result<Instant>> + Send;
+    fn send(&self, req: &Request) -> impl std::future::Future<Output = io::Result<Instant>> + Send;
     fn recv(&self) -> impl std::future::Future<Output = io::Result<Response>> + Send;
 }
 
@@ -27,7 +24,10 @@ pub async fn transmitter(
         match r {
             Some(req) => match transport.send(&req).await {
                 Ok(timestamp) => {
-                    let s = StatEntry::Open(Entry { id: req.id, ts: timestamp });
+                    let s = StatEntry::Open(Entry {
+                        id: req.id,
+                        ts: timestamp,
+                    });
                     if to_statista.send(s).await.is_err() {
                         break;
                     }
@@ -42,10 +42,7 @@ pub async fn transmitter(
     }
 }
 
-pub async fn receiver(
-    transport: impl Transport,
-    to_statista: Sender<StatEntry>,
-) {
+pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>) {
     loop {
         tokio::select! {
             result = transport.recv() => {
@@ -101,17 +98,12 @@ mod tests {
     }
 
     impl Transport for MockTransport {
-        fn send(
-            &self,
-            _req: &Request,
-        ) -> impl std::future::Future<Output = io::Result<Instant>> + Send {
-            async {
-                tokio::time::sleep(self.send_delay).await;
-                Ok(Instant::now())
-            }
+        async fn send(&self, _req: &Request) -> io::Result<Instant> {
+            tokio::time::sleep(self.send_delay).await;
+            Ok(Instant::now())
         }
 
-        fn recv(&self) -> impl std::future::Future<Output = io::Result<Response>> + Send {
+        async fn recv(&self) -> io::Result<Response> {
             let id = {
                 let mut idx = self.recv_index.lock().unwrap();
                 if *idx < self.recv_responses.len() {
@@ -122,12 +114,14 @@ mod tests {
                     None
                 }
             };
-            async move {
-                tokio::time::sleep(std::time::Duration::from_micros(1)).await;
-                match id {
-                    Some(id) => Ok(Response { id, timestamp: Instant::now() }),
-                    None => Err(io::Error::new(io::ErrorKind::Other, "no more responses")),
-                }
+
+            tokio::time::sleep(std::time::Duration::from_micros(1)).await;
+            match id {
+                Some(id) => Ok(Response {
+                    id,
+                    timestamp: Instant::now(),
+                }),
+                None => Err(io::Error::other("no more responses")),
             }
         }
     }
@@ -204,18 +198,38 @@ mod tests {
         let (stat_tx, mut stat_rx) = mpsc::channel(8);
         let transport = MockTransport::new(vec![]);
 
-        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
-        req_tx.send(Request { id: 1, request_size: None, response_size: None }).await.unwrap();
-        req_tx.send(Request { id: 2, request_size: None, response_size: None }).await.unwrap();
+        req_tx
+            .send(Request {
+                id: 0,
+                request_size: None,
+                response_size: None,
+            })
+            .await
+            .unwrap();
+        req_tx
+            .send(Request {
+                id: 1,
+                request_size: None,
+                response_size: None,
+            })
+            .await
+            .unwrap();
+        req_tx
+            .send(Request {
+                id: 2,
+                request_size: None,
+                response_size: None,
+            })
+            .await
+            .unwrap();
         drop(req_tx);
 
         transmitter(transport, req_rx, stat_tx).await;
 
         let mut ids = Vec::new();
         while let Some(entry) = stat_rx.recv().await {
-            match entry {
-                StatEntry::Open(e) => ids.push(e.id),
-                _ => {}
+            if let StatEntry::Open(e) = entry {
+                ids.push(e.id);
             }
         }
         assert_eq!(ids, vec![0, 1, 2]);
@@ -227,11 +241,14 @@ mod tests {
         let (stat_tx, mut stat_rx) = mpsc::channel(8);
         let transport = MockTransport::new(vec![]);
 
-        req_tx.send(Request {
-            id: 10,
-            request_size: Some(64),
-            response_size: Some(128),
-        }).await.unwrap();
+        req_tx
+            .send(Request {
+                id: 10,
+                request_size: Some(64),
+                response_size: Some(128),
+            })
+            .await
+            .unwrap();
         drop(req_tx);
 
         transmitter(transport, req_rx, stat_tx).await;
@@ -246,16 +263,18 @@ mod tests {
     struct ErrorTransport;
 
     impl Clone for ErrorTransport {
-        fn clone(&self) -> Self { ErrorTransport }
+        fn clone(&self) -> Self {
+            ErrorTransport
+        }
     }
 
     impl Transport for ErrorTransport {
         async fn send(&self, _req: &Request) -> io::Result<Instant> {
-            Err(io::Error::new(io::ErrorKind::Other, "send error"))
+            Err(io::Error::other("send error"))
         }
 
         async fn recv(&self) -> io::Result<Response> {
-            Err(io::Error::new(io::ErrorKind::Other, "recv error"))
+            Err(io::Error::other("recv error"))
         }
     }
 
@@ -265,7 +284,14 @@ mod tests {
         let (stat_tx, _stat_rx) = mpsc::channel(8);
         let transport = ErrorTransport;
 
-        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+        req_tx
+            .send(Request {
+                id: 0,
+                request_size: None,
+                response_size: None,
+            })
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
@@ -278,9 +304,10 @@ mod tests {
     #[tokio::test]
     async fn receiver_exits_on_stat_channel_close() {
         let (stat_tx, mut stat_rx) = mpsc::channel(8);
-        let transport = MockTransport::new(vec![
-            Response { id: 0, timestamp: Instant::now() },
-        ]);
+        let transport = MockTransport::new(vec![Response {
+            id: 0,
+            timestamp: Instant::now(),
+        }]);
 
         let handle = tokio::spawn(receiver(transport, stat_tx));
 
@@ -309,16 +336,26 @@ mod tests {
     async fn receiver_multiple_responses_in_order() {
         let (stat_tx, mut stat_rx) = mpsc::channel(8);
         let transport = MockTransport::new(vec![
-            Response { id: 0, timestamp: Instant::now() },
-            Response { id: 1, timestamp: Instant::now() },
-            Response { id: 2, timestamp: Instant::now() },
+            Response {
+                id: 0,
+                timestamp: Instant::now(),
+            },
+            Response {
+                id: 1,
+                timestamp: Instant::now(),
+            },
+            Response {
+                id: 2,
+                timestamp: Instant::now(),
+            },
         ]);
 
         let handle = tokio::spawn(receiver(transport, stat_tx));
 
         let mut ids = Vec::new();
         for _ in 0..3 {
-            match tokio::time::timeout(std::time::Duration::from_millis(100), stat_rx.recv()).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), stat_rx.recv()).await
+            {
                 Ok(Some(StatEntry::Close(e))) => ids.push(e.id),
                 _ => break,
             }
@@ -333,7 +370,14 @@ mod tests {
         let (stat_tx, _stat_rx) = mpsc::channel(1);
         let transport = MockTransport::new(vec![]);
 
-        req_tx.send(Request { id: 0, request_size: None, response_size: None }).await.unwrap();
+        req_tx
+            .send(Request {
+                id: 0,
+                request_size: None,
+                response_size: None,
+            })
+            .await
+            .unwrap();
         drop(req_tx);
 
         tokio::time::timeout(

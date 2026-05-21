@@ -6,43 +6,16 @@ use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
-use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
+use crate::echo_codec;
+use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::transport::Transport;
 
 pub fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
-    let r = Echo {
-        id: req.id,
-        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-        resp_size: req.response_size.unwrap_or(0),
-    };
-
-    let mut buf = bincode::serialize(&r).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
-    })?;
-
-    if let Some(size) = req.request_size {
-        buf.resize(size as usize, 0);
-    }
-
-    Ok(buf)
+    echo_codec::encode_request(req)
 }
 
 pub fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
-    if buf.len() < PING_HDR_LEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("packet too short: {} bytes", buf.len()),
-        ));
-    }
-
-    let r: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("deserialize: {e}"))
-    })?;
-
-    Ok(Response {
-        id: r.id,
-        timestamp: Instant::now(),
-    })
+    echo_codec::decode_response(buf)
 }
 
 pub async fn server_transport(local_address: SocketAddr) {
@@ -86,7 +59,7 @@ pub async fn server_transport(local_address: SocketAddr) {
             continue;
         }
 
-        let mut req: Echo = match bincode::deserialize(&buf[..PING_HDR_LEN]) {
+        let req: Echo = match echo_codec::decode_header(&buf[..n]) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("server: failed to deserialize from {addr}: {e}");
@@ -94,20 +67,13 @@ pub async fn server_transport(local_address: SocketAddr) {
             }
         };
 
-        if req.resp_size > 0 {
-            req.len = req.resp_size;
-        }
-        req.resp_size = 0;
-
-        let mut send_buf = match bincode::serialize(&req) {
+        let send_buf = match echo_codec::encode_response(req) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("server: failed to serialize response: {e}");
                 continue;
             }
         };
-
-        send_buf.resize(req.len as usize, 0);
 
         if let Err(e) = sock.send_to(&send_buf, addr).await {
             eprintln!("server: send error to {addr}: {e}");
@@ -122,9 +88,9 @@ pub struct UdpClientTransport {
 
 impl UdpClientTransport {
     pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
-        let socket = UdpSocket::bind(local).await.map_err(|e| {
-            io::Error::new(e.kind(), format!("client bind to {local} failed: {e}"))
-        })?;
+        let socket = UdpSocket::bind(local)
+            .await
+            .map_err(|e| io::Error::new(e.kind(), format!("client bind to {local} failed: {e}")))?;
         socket.connect(remote).await.map_err(|e| {
             io::Error::new(e.kind(), format!("client connect to {remote} failed: {e}"))
         })?;
@@ -157,7 +123,11 @@ mod tests {
 
     #[test]
     fn build_udp_echo_default_size() {
-        let req = Request { id: 10, request_size: None, response_size: None };
+        let req = Request {
+            id: 10,
+            request_size: None,
+            response_size: None,
+        };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), PING_HDR_LEN);
         let echo: Echo = bincode::deserialize(&buf).unwrap();
@@ -167,7 +137,11 @@ mod tests {
 
     #[test]
     fn build_udp_echo_padded() {
-        let req = Request { id: 42, request_size: Some(100), response_size: None };
+        let req = Request {
+            id: 42,
+            request_size: Some(100),
+            response_size: None,
+        };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), 100);
         let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
@@ -177,7 +151,11 @@ mod tests {
 
     #[test]
     fn build_udp_echo_with_resp_size() {
-        let req = Request { id: 7, request_size: Some(50), response_size: Some(128) };
+        let req = Request {
+            id: 7,
+            request_size: Some(50),
+            response_size: Some(128),
+        };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), 50);
         let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
@@ -188,7 +166,11 @@ mod tests {
 
     #[test]
     fn build_udp_echo_zero_id() {
-        let req = Request { id: 0, request_size: Some(12), response_size: None };
+        let req = Request {
+            id: 0,
+            request_size: Some(12),
+            response_size: None,
+        };
         let buf = build_udp_echo(&req).unwrap();
         let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0);
@@ -196,7 +178,11 @@ mod tests {
 
     #[test]
     fn parse_udp_response_valid() {
-        let req = Request { id: 99, request_size: None, response_size: None };
+        let req = Request {
+            id: 99,
+            request_size: None,
+            response_size: None,
+        };
         let buf = build_udp_echo(&req).unwrap();
         let resp = parse_udp_response(&buf).unwrap();
         assert_eq!(resp.id, 99);
@@ -228,12 +214,9 @@ mod tests {
         let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_sock.local_addr().unwrap();
 
-        let transport = UdpClientTransport::new(
-            "0.0.0.0:0".parse().unwrap(),
-            server_addr,
-        )
-        .await
-        .unwrap();
+        let transport = UdpClientTransport::new("0.0.0.0:0".parse().unwrap(), server_addr)
+            .await
+            .unwrap();
 
         let server_handle = tokio::spawn(async move {
             let mut buf = vec![0; PING_HDR_LEN + 100];
@@ -259,12 +242,9 @@ mod tests {
         let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_sock.local_addr().unwrap();
 
-        let transport = UdpClientTransport::new(
-            "0.0.0.0:0".parse().unwrap(),
-            server_addr,
-        )
-        .await
-        .unwrap();
+        let transport = UdpClientTransport::new("0.0.0.0:0".parse().unwrap(), server_addr)
+            .await
+            .unwrap();
 
         let server_handle = tokio::spawn(async move {
             let mut buf = vec![0; PING_HDR_LEN + 100];
@@ -292,12 +272,9 @@ mod tests {
         let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_sock.local_addr().unwrap();
 
-        let transport = UdpClientTransport::new(
-            "0.0.0.0:0".parse().unwrap(),
-            server_addr,
-        )
-        .await
-        .unwrap();
+        let transport = UdpClientTransport::new("0.0.0.0:0".parse().unwrap(), server_addr)
+            .await
+            .unwrap();
 
         let server_handle = tokio::spawn(async move {
             let mut buf = vec![0; 512];

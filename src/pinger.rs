@@ -38,9 +38,8 @@ pub struct Echo {
     pub resp_size: u16,
 }
 
-pub const PING_HDR_LEN: usize = std::mem::size_of::<u64>()
-    + std::mem::size_of::<u16>()
-    + std::mem::size_of::<u16>();
+pub const PING_HDR_LEN: usize =
+    std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
 
 pub async fn generator(
     to_tx_transport: mpsc::Sender<Request>,
@@ -58,7 +57,9 @@ pub async fn generator(
     tokio::pin!(run_time);
 
     loop {
-        if let Some(n) = ping_number && id >= n {
+        if let Some(n) = ping_number
+            && id >= n
+        {
             break;
         }
 
@@ -131,7 +132,11 @@ mod tests {
 
     #[test]
     fn echo_zero_values() {
-        let echo = Echo { id: 0, len: 0, resp_size: 0 };
+        let echo = Echo {
+            id: 0,
+            len: 0,
+            resp_size: 0,
+        };
         let bytes = bincode::serialize(&echo).unwrap();
         assert_eq!(bytes.len(), PING_HDR_LEN);
         let decoded: Echo = bincode::deserialize(&bytes).unwrap();
@@ -142,7 +147,11 @@ mod tests {
 
     #[test]
     fn echo_max_values() {
-        let echo = Echo { id: u64::MAX, len: u16::MAX, resp_size: u16::MAX };
+        let echo = Echo {
+            id: u64::MAX,
+            len: u16::MAX,
+            resp_size: u16::MAX,
+        };
         let bytes = bincode::serialize(&echo).unwrap();
         assert_eq!(bytes.len(), PING_HDR_LEN);
         let decoded: Echo = bincode::deserialize(&bytes).unwrap();
@@ -153,7 +162,11 @@ mod tests {
 
     #[test]
     fn echo_field_order_guaranteed() {
-        let echo = Echo { id: 1, len: 2, resp_size: 3 };
+        let echo = Echo {
+            id: 1,
+            len: 2,
+            resp_size: 3,
+        };
         let bytes = bincode::serialize(&echo).unwrap();
         assert_eq!(bytes[0..8], 1u64.to_le_bytes());
         assert_eq!(bytes[8..10], 2u16.to_le_bytes());
@@ -198,7 +211,11 @@ mod tests {
 
     #[test]
     fn request_default_sizes() {
-        let req = Request { id: 0, request_size: None, response_size: None };
+        let req = Request {
+            id: 0,
+            request_size: None,
+            response_size: None,
+        };
         assert!(req.request_size.is_none());
         assert!(req.response_size.is_none());
     }
@@ -237,9 +254,11 @@ mod tests {
         ));
 
         let mut count = 0;
-        while let Some(_) = rx.recv().await {
+        while rx.recv().await.is_some() {
             count += 1;
-            if count >= 5 { break; }
+            if count >= 5 {
+                break;
+            }
         }
         assert_eq!(count, 5);
         handle.await.unwrap();

@@ -8,32 +8,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
-use crate::pinger::{Echo, Request, Response, PING_HDR_LEN};
+use crate::echo_codec;
+use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn build_tcp_echo(req: &Request) -> io::Result<Vec<u8>> {
-    let r = Echo {
-        id: req.id,
-        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-        resp_size: req.response_size.unwrap_or(0),
-    };
-
-    let mut buf = bincode::serialize(&r).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
-    })?;
-
-    if let Some(size) = req.request_size {
-        buf.resize(size as usize, 0);
-    }
-
-    Ok(buf)
+    echo_codec::encode_request(req)
 }
 
 pub fn parse_tcp_header(hdr: &[u8; PING_HDR_LEN]) -> io::Result<Echo> {
-    bincode::deserialize(hdr)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize header: {e}")))
+    echo_codec::decode_header(hdr)
 }
 
 async fn server_connection_handler(mut sock: TcpStream) {
@@ -52,7 +38,7 @@ async fn server_connection_handler(mut sock: TcpStream) {
                 break;
             }
             Ok(amt) => {
-                let mut req: Echo = match bincode::deserialize(&hdr_buf) {
+                let req: Echo = match echo_codec::decode_header(&hdr_buf) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Failed to deserialize request from {peer_addr}: {e}");
@@ -79,19 +65,13 @@ async fn server_connection_handler(mut sock: TcpStream) {
                     }
                 }
 
-                if req.resp_size > 0 {
-                    req.len = req.resp_size;
-                }
-                req.resp_size = 0;
-
-                let mut send_buf = match bincode::serialize(&req) {
+                let send_buf = match echo_codec::encode_response(req) {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("Failed to serialize response: {e}");
                         break;
                     }
                 };
-                send_buf.resize(req.len as usize, 0);
 
                 if let Err(e) = sock.write_all(&send_buf).await {
                     eprintln!("Error sending echo to {peer_addr}: {e}");
@@ -185,12 +165,7 @@ impl Transport for TcpClientTransport {
                 }
                 Ok(n) => offset += n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => {
-                    return Err(io::Error::new(
-                        e.kind(),
-                        format!("recv header failed: {e}"),
-                    ))
-                }
+                Err(e) => return Err(io::Error::new(e.kind(), format!("recv header failed: {e}"))),
             }
         }
 
@@ -204,9 +179,7 @@ impl Transport for TcpClientTransport {
                 timeout(IO_TIMEOUT, self.stream.readable())
                     .await
                     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv payload timeout"))?
-                    .map_err(|e| {
-                        io::Error::new(e.kind(), format!("recv: readable failed: {e}"))
-                    })?;
+                    .map_err(|e| io::Error::new(e.kind(), format!("recv: readable failed: {e}")))?;
 
                 match self.stream.try_read(&mut extra[offset..]) {
                     Ok(0) => {
@@ -221,7 +194,7 @@ impl Transport for TcpClientTransport {
                         return Err(io::Error::new(
                             e.kind(),
                             format!("recv payload failed: {e}"),
-                        ))
+                        ));
                     }
                 }
             }
@@ -241,7 +214,11 @@ mod tests {
 
     #[test]
     fn build_tcp_echo_default_size() {
-        let req = Request { id: 10, request_size: None, response_size: None };
+        let req = Request {
+            id: 10,
+            request_size: None,
+            response_size: None,
+        };
         let buf = build_tcp_echo(&req).unwrap();
         assert_eq!(buf.len(), PING_HDR_LEN);
         let echo: Echo = bincode::deserialize(&buf).unwrap();
@@ -251,7 +228,11 @@ mod tests {
 
     #[test]
     fn build_tcp_echo_padded() {
-        let req = Request { id: 99, request_size: Some(64), response_size: None };
+        let req = Request {
+            id: 99,
+            request_size: Some(64),
+            response_size: None,
+        };
         let buf = build_tcp_echo(&req).unwrap();
         assert_eq!(buf.len(), 64);
         assert_eq!(&buf[PING_HDR_LEN..], &[0u8; 64 - PING_HDR_LEN]);
@@ -259,7 +240,11 @@ mod tests {
 
     #[test]
     fn build_tcp_echo_with_resp_size() {
-        let req = Request { id: 5, request_size: Some(50), response_size: Some(200) };
+        let req = Request {
+            id: 5,
+            request_size: Some(50),
+            response_size: Some(200),
+        };
         let buf = build_tcp_echo(&req).unwrap();
         let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 5);
@@ -268,7 +253,11 @@ mod tests {
 
     #[test]
     fn parse_tcp_header_valid() {
-        let req = Request { id: 42, request_size: Some(100), response_size: Some(200) };
+        let req = Request {
+            id: 42,
+            request_size: Some(100),
+            response_size: Some(200),
+        };
         let buf = build_tcp_echo(&req).unwrap();
         let mut hdr = [0u8; PING_HDR_LEN];
         hdr.copy_from_slice(&buf[..PING_HDR_LEN]);

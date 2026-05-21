@@ -1,18 +1,22 @@
+pub mod echo_codec;
 pub mod pinger;
+pub mod protocol;
 pub mod statistics;
 pub mod transport;
 
-pub use pinger::{
-    Echo, Entry, Request, Response, SendMode, StatEntry, generator, PING_HDR_LEN,
+pub use pinger::{Echo, Entry, PING_HDR_LEN, Request, Response, SendMode, StatEntry, generator};
+pub use protocol::Protocol;
+pub use statistics::{
+    RttSequence, statista, statista_with_collector, statista_with_presenter_and_collector,
 };
-pub use statistics::{statista, statista_with_collector, RttSequence};
 pub use transport::async_icmp::IcmpClientTransport;
 pub use transport::async_tcp::TcpClientTransport;
 pub use transport::async_udp::UdpClientTransport;
-pub use transport::{receiver, transmitter, Transport};
+pub use transport::{Transport, receiver, transmitter};
 
 use std::io;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -21,6 +25,9 @@ pub fn has_port(addr: &str) -> bool {
         let after_bracket = addr.split(']').nth(1).unwrap_or("");
         after_bracket.starts_with(':')
     } else {
+        if addr.matches(':').count() > 1 {
+            return false;
+        }
         let last_colon = addr.rfind(':');
         match last_colon {
             Some(i) => {
@@ -32,15 +39,17 @@ pub fn has_port(addr: &str) -> bool {
     }
 }
 
-pub fn ensure_port(addr: &str, protocol: &str) -> String {
+pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
     if has_port(addr) {
-        return addr.to_string();
+        return Ok(addr.to_string());
     }
-    if protocol == "icmp" {
-        return format!("{addr}:0");
+    if protocol == Protocol::Icmp {
+        return Ok(format!("{addr}:0"));
     }
-    eprintln!("error: {protocol} requires a port (e.g. {addr}:PORT)");
-    std::process::exit(1);
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{protocol} requires a port (e.g. {addr}:PORT)"),
+    ))
 }
 
 /// A single RTT measurement result.
@@ -192,108 +201,174 @@ impl Pinger {
     }
 
     pub async fn run(self) -> io::Result<PingReport> {
-        let channel_cap = 1024;
-        let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(channel_cap);
-        let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(channel_cap);
-        let (result_send, mut result_recv) = mpsc::channel::<PingResult>(channel_cap);
+        let protocol = Protocol::from_str(&self.protocol)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-        let addr = ensure_port(&self.remote, &self.protocol);
-        let remote_addr = match tokio::net::lookup_host(&addr).await {
-            Ok(mut addrs) => match addrs.next() {
-                Some(a) => a,
-                None => {
-                    return Err(io::Error::other(
-                        format!("no addresses found for {}", self.remote),
-                    ))
-                }
-            },
-            Err(e) => {
-                return Err(io::Error::other(
-                    format!("failed to resolve '{}': {}", self.remote, e),
-                ))
-            }
-        };
+        run_ping_session(PingConfig {
+            remote: self.remote,
+            local: self.local,
+            protocol,
+            interval: self.interval,
+            adaptive: self.adaptive,
+            wait_time: Duration::from_millis(self.wait_time),
+            request_size: self.request_size,
+            response_size: self.response_size,
+            ping_number: self.ping_number,
+            run_time: self.run_time,
+        })
+        .await
+    }
+}
 
-        let (send_mode, txtr_gen) = if self.adaptive {
-            let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(channel_cap);
-            (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
-        } else {
-            (SendMode::Interval(self.interval), None)
-        };
+#[derive(Clone, Debug)]
+pub struct PingConfig {
+    pub remote: String,
+    pub local: SocketAddr,
+    pub protocol: Protocol,
+    pub interval: u64,
+    pub adaptive: bool,
+    pub wait_time: Duration,
+    pub request_size: Option<u16>,
+    pub response_size: Option<u16>,
+    pub ping_number: Option<u64>,
+    pub run_time: Option<Duration>,
+}
 
-        let (mut tx_handle, mut rx_handle) = match self.protocol.as_str() {
-            "udp" => {
-                let transport =
-                    UdpClientTransport::new(self.local, remote_addr).await?;
-                spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
-            }
-            "tcp" => {
-                let sock = if remote_addr.is_ipv4() {
-                    tokio::net::TcpSocket::new_v4()?
-                } else {
-                    tokio::net::TcpSocket::new_v6()?
-                };
-                sock.bind(self.local)?;
-                let stream = sock.connect(remote_addr).await?;
-                let transport = TcpClientTransport::new(stream);
-                spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
-            }
-            "icmp" => {
-                let transport =
-                    IcmpClientTransport::new(self.local, remote_addr).await?;
-                spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unknown protocol: {}", self.protocol),
-                ))
-            }
-        };
+impl PingConfig {
+    pub fn new(remote: String, protocol: Protocol) -> Self {
+        Self {
+            remote,
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol,
+            interval: 1000,
+            adaptive: false,
+            wait_time: Duration::from_millis(1000),
+            request_size: None,
+            response_size: None,
+            ping_number: None,
+            run_time: None,
+        }
+    }
+}
 
-        let generator = tokio::spawn(pinger::generator(
-            gen_txtr_send,
-            send_mode,
-            self.ping_number,
-            self.run_time,
-            self.request_size,
-            self.response_size,
-        ));
+pub async fn run_ping_session(config: PingConfig) -> io::Result<PingReport> {
+    run_ping_session_inner(config, false).await
+}
 
-        let statista = tokio::spawn(statistics::statista_with_collector(
+pub async fn run_ping_session_with_output(config: PingConfig) -> io::Result<PingReport> {
+    run_ping_session_inner(config, true).await
+}
+
+async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::Result<PingReport> {
+    let channel_cap = 1024;
+    let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(channel_cap);
+    let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(channel_cap);
+    let (result_send, mut result_recv) = mpsc::channel::<PingResult>(channel_cap);
+
+    let addr = ensure_port(&config.remote, config.protocol)?;
+    let remote_addr = match tokio::net::lookup_host(&addr).await {
+        Ok(mut addrs) => match addrs.next() {
+            Some(a) => a,
+            None => {
+                return Err(io::Error::other(format!(
+                    "no addresses found for {}",
+                    config.remote
+                )));
+            }
+        },
+        Err(e) => {
+            return Err(io::Error::other(format!(
+                "failed to resolve '{}': {}",
+                config.remote, e
+            )));
+        }
+    };
+
+    let (send_mode, txtr_gen) = if config.adaptive {
+        let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(channel_cap);
+        (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
+    } else {
+        (SendMode::Interval(config.interval), None)
+    };
+
+    let (mut tx_handle, mut rx_handle) = match config.protocol {
+        Protocol::Udp => {
+            let transport = UdpClientTransport::new(config.local, remote_addr).await?;
+            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+        }
+        Protocol::Tcp => {
+            let sock = if remote_addr.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()?
+            } else {
+                tokio::net::TcpSocket::new_v6()?
+            };
+            sock.bind(config.local)?;
+            let stream = sock.connect(remote_addr).await?;
+            let transport = TcpClientTransport::new(stream);
+            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+        }
+        Protocol::Icmp => {
+            let transport = IcmpClientTransport::new(config.local, remote_addr).await?;
+            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+        }
+    };
+
+    let generator = tokio::spawn(pinger::generator(
+        gen_txtr_send,
+        send_mode,
+        config.ping_number,
+        config.run_time,
+        config.request_size,
+        config.response_size,
+    ));
+
+    let statista = if print_output {
+        tokio::spawn(statistics::statista_with_presenter_and_collector(
             txtr_stat_recv,
             txtr_gen,
-            Duration::from_millis(self.wait_time),
+            config.wait_time,
             result_send,
-        ));
+        ))
+    } else {
+        tokio::spawn(statistics::statista_with_collector(
+            txtr_stat_recv,
+            txtr_gen,
+            config.wait_time,
+            result_send,
+        ))
+    };
 
-        tokio::select! {
-            _ = &mut tx_handle => {
-                rx_handle.abort();
-            }
-            _ = &mut rx_handle => {}
+    tokio::select! {
+        _ = &mut tx_handle => {
+            rx_handle.abort();
         }
-
-        drop(tx_handle);
-        drop(rx_handle);
-
-        let mut results = Vec::new();
-        while let Some(r) = result_recv.recv().await {
-            results.push((r.seq, r.rtt));
-        }
-        let _ = generator.await;
-        let _ = statista.await;
-
-        let sent = results.len() as u64;
-        let received = results.len() as u64;
-        let rtts: Vec<Duration> = results.into_iter().map(|(_, rtt)| rtt).collect();
-
-        Ok(PingReport {
-            rtts,
-            sent,
-            received,
-        })
+        _ = &mut rx_handle => {}
     }
+
+    drop(tx_handle);
+    drop(rx_handle);
+
+    while result_recv.recv().await.is_some() {}
+    let _ = generator.await;
+    let stat_report = statista
+        .await
+        .map_err(|e| io::Error::other(format!("statista task failed: {e}")))?;
+
+    Ok(stat_report)
+}
+
+pub async fn run_server(protocol: Protocol, local: SocketAddr) -> io::Result<()> {
+    match protocol {
+        Protocol::Tcp => transport::async_tcp::server_transport(local).await,
+        Protocol::Udp => transport::async_udp::server_transport(local).await,
+        Protocol::Icmp => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "there is no server for ICMP",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn spawn_pinger_tasks<T: Transport + Clone + Send + 'static>(
@@ -373,27 +448,44 @@ mod tests {
 
     #[test]
     fn ensure_port_keeps_existing_v4() {
-        assert_eq!(ensure_port("10.0.0.1:9999", "udp"), "10.0.0.1:9999");
+        assert_eq!(
+            ensure_port("10.0.0.1:9999", Protocol::Udp).unwrap(),
+            "10.0.0.1:9999"
+        );
     }
 
     #[test]
     fn ensure_port_keeps_existing_v6() {
-        assert_eq!(ensure_port("[::1]:443", "tcp"), "[::1]:443");
+        assert_eq!(
+            ensure_port("[::1]:443", Protocol::Tcp).unwrap(),
+            "[::1]:443"
+        );
     }
 
     #[test]
     fn ensure_port_adds_zero_for_icmp_v4() {
-        assert_eq!(ensure_port("192.168.1.1", "icmp"), "192.168.1.1:0");
+        assert_eq!(
+            ensure_port("192.168.1.1", Protocol::Icmp).unwrap(),
+            "192.168.1.1:0"
+        );
     }
 
     #[test]
     fn ensure_port_adds_zero_for_icmp_v6() {
-        assert_eq!(ensure_port("[::1]", "icmp"), "[::1]:0");
+        assert_eq!(ensure_port("[::1]", Protocol::Icmp).unwrap(), "[::1]:0");
     }
 
     #[test]
     fn ensure_port_adds_zero_for_icmp_hostname() {
-        assert_eq!(ensure_port("localhost", "icmp"), "localhost:0");
+        assert_eq!(
+            ensure_port("localhost", Protocol::Icmp).unwrap(),
+            "localhost:0"
+        );
+    }
+
+    #[test]
+    fn ensure_port_errors_for_udp_without_port() {
+        assert!(ensure_port("localhost", Protocol::Udp).is_err());
     }
 
     #[test]

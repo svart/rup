@@ -1,13 +1,16 @@
+#[cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp::Ordering, collections::VecDeque};
 
+#[cfg(test)]
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
-use crate::pinger::{Entry, StatEntry};
 use crate::PingResult;
+use crate::pinger::{Entry, StatEntry};
 
 #[derive(Debug)]
 struct PingRTT {
@@ -26,6 +29,7 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
+#[cfg(test)]
 async fn receive_timeout(
     index: u64,
     req_mutex: Arc<Mutex<VecDeque<Entry>>>,
@@ -50,129 +54,188 @@ async fn receive_timeout(
     }
 }
 
-pub async fn statista(
+enum StatSink {
+    Presenter(Sender<PingRTT>),
+    Collector(Sender<PingResult>),
+    Both {
+        presenter: Sender<PingRTT>,
+        collector: Sender<PingResult>,
+    },
+}
+
+async fn signal_generator(to_generator: &Option<Sender<()>>) {
+    if let Some(gen_channel) = to_generator {
+        let _ = gen_channel.send(()).await;
+    }
+}
+
+async fn emit_ping(sink: &StatSink, index: u64, rtt: Duration) -> bool {
+    match sink {
+        StatSink::Presenter(sender) => sender.send(PingRTT { index, rtt }).await.is_ok(),
+        StatSink::Collector(sender) => sender.send(PingResult { seq: index, rtt }).await.is_ok(),
+        StatSink::Both {
+            presenter,
+            collector,
+        } => {
+            let presenter_ok = presenter.send(PingRTT { index, rtt }).await.is_ok();
+            let collector_ok = collector.send(PingResult { seq: index, rtt }).await.is_ok();
+            presenter_ok && collector_ok
+        }
+    }
+}
+
+async fn expire_timed_out(
+    requests: &mut VecDeque<Entry>,
+    wait_time: Duration,
+    to_generator: &Option<Sender<()>>,
+    print_timeouts: bool,
+) {
+    while let Some(req) = requests.front() {
+        if req.ts.elapsed() < wait_time {
+            break;
+        }
+
+        let req = requests.pop_front().expect("front checked above");
+        if print_timeouts {
+            println!("seq={} timeout", req.id);
+        }
+        signal_generator(to_generator).await;
+    }
+}
+
+async fn run_statista_core(
     mut from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
+    sink: StatSink,
+) -> crate::PingReport {
+    let mut requests = VecDeque::<Entry>::new();
+    let mut rtts = Vec::new();
+    let mut total_sent = 0u64;
+    let print_events = matches!(sink, StatSink::Presenter(_) | StatSink::Both { .. });
+
+    loop {
+        let timeout = requests
+            .front()
+            .map(|req| wait_time.saturating_sub(req.ts.elapsed()))
+            .unwrap_or(wait_time);
+
+        tokio::select! {
+            resp = from_transport.recv() => {
+                let Some(resp) = resp else { break; };
+
+                match resp {
+                    StatEntry::Open(t) => {
+                        total_sent += 1;
+                        requests.push_back(t);
+                    }
+                    StatEntry::Close(t) => {
+                        let index = t.id;
+
+                        while let Some(req) = requests.pop_front() {
+                            match index.cmp(&req.id) {
+                                Ordering::Greater => {
+                                    if print_events {
+                                        println!("seq={} reorder or loss", req.id);
+                                    }
+                                    continue;
+                                }
+                                Ordering::Equal => {
+                                    let rtt = t.ts.duration_since(req.ts);
+                                    rtts.push(rtt);
+                                    signal_generator(&to_generator).await;
+
+                                    if !emit_ping(&sink, index, rtt).await {
+                                        return crate::PingReport {
+                                            sent: total_sent,
+                                            received: rtts.len() as u64,
+                                            rtts,
+                                        };
+                                    }
+                                }
+                                Ordering::Less => requests.push_front(req),
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            _ = sleep(timeout), if !requests.is_empty() => {
+                expire_timed_out(&mut requests, wait_time, &to_generator, print_events).await;
+            }
+        }
+    }
+
+    crate::PingReport {
+        sent: total_sent,
+        received: rtts.len() as u64,
+        rtts,
+    }
+}
+
+pub async fn statista(
+    from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
 ) {
-    let req_lock = Arc::new(Mutex::new(VecDeque::<Entry>::new()));
-    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) =
-        mpsc::channel(32);
+    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
     let (sent_tx, sent_rx) = oneshot::channel();
 
     tokio::spawn(presenter(stat_pres_recv, sent_rx));
 
-    let mut total_sent = 0u64;
+    let report = run_statista_core(
+        from_transport,
+        to_generator,
+        wait_time,
+        StatSink::Presenter(stat_pres_send),
+    )
+    .await;
 
-    while let Some(resp) = from_transport.recv().await {
-        match resp {
-            StatEntry::Open(t) => {
-                total_sent += 1;
-                tokio::spawn(receive_timeout(
-                    t.id,
-                    req_lock.clone(),
-                    wait_time,
-                    to_generator.clone(),
-                ));
-
-                let mut requests = req_lock.lock().await;
-                requests.push_back(t);
-            }
-            StatEntry::Close(t) => {
-                let index = t.id;
-
-                let mut requests = req_lock.lock().await;
-
-                while let Some(req) = requests.pop_front() {
-                    match index.cmp(&req.id) {
-                        Ordering::Greater => {
-                            println!("seq={index} reorder or loss");
-                            continue;
-                        }
-                        Ordering::Equal => {
-                            let ping = PingRTT {
-                                index,
-                                rtt: t.ts.duration_since(req.ts),
-                            };
-
-                            if let Some(gen_channel) = &to_generator {
-                                let _ = gen_channel.send(()).await;
-                            }
-
-                            if stat_pres_send.send(ping).await.is_err() {
-                                return;
-                            }
-                        }
-                        Ordering::Less => requests.push_front(req),
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    let _ = sent_tx.send(total_sent);
+    let _ = sent_tx.send(report.sent);
 }
 
 pub async fn statista_with_collector(
-    mut from_transport: Receiver<StatEntry>,
+    from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
     collector: Sender<PingResult>,
-) {
-    let req_lock = Arc::new(Mutex::new(VecDeque::<Entry>::new()));
-
-    while let Some(resp) = from_transport.recv().await {
-        match resp {
-            StatEntry::Open(t) => {
-                tokio::spawn(receive_timeout(
-                    t.id,
-                    req_lock.clone(),
-                    wait_time,
-                    to_generator.clone(),
-                ));
-
-                let mut requests = req_lock.lock().await;
-                requests.push_back(t);
-            }
-            StatEntry::Close(t) => {
-                let index = t.id;
-
-                let mut requests = req_lock.lock().await;
-
-                while let Some(req) = requests.pop_front() {
-                    match index.cmp(&req.id) {
-                        Ordering::Greater => {
-                            continue;
-                        }
-                        Ordering::Equal => {
-                            let rtt = t.ts.duration_since(req.ts);
-
-                            if let Some(gen_channel) = &to_generator {
-                                let _ = gen_channel.send(()).await;
-                            }
-
-                            if collector
-                                .send(PingResult { seq: index, rtt })
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Ordering::Less => requests.push_front(req),
-                    }
-                    break;
-                }
-            }
-        }
-    }
+) -> crate::PingReport {
+    run_statista_core(
+        from_transport,
+        to_generator,
+        wait_time,
+        StatSink::Collector(collector),
+    )
+    .await
 }
 
-async fn presenter(
-    mut from_statista: Receiver<PingRTT>,
-    sent_rx: oneshot::Receiver<u64>,
-) {
+pub async fn statista_with_presenter_and_collector(
+    from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+    collector: Sender<PingResult>,
+) -> crate::PingReport {
+    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
+    let (sent_tx, sent_rx) = oneshot::channel();
+
+    tokio::spawn(presenter(stat_pres_recv, sent_rx));
+
+    let report = run_statista_core(
+        from_transport,
+        to_generator,
+        wait_time,
+        StatSink::Both {
+            presenter: stat_pres_send,
+            collector,
+        },
+    )
+    .await;
+
+    let _ = sent_tx.send(report.sent);
+    report
+}
+
+async fn presenter(mut from_statista: Receiver<PingRTT>, sent_rx: oneshot::Receiver<u64>) {
     let mut sequence = RttSequence::new();
 
     while let Some(t) = from_statista.recv().await {
@@ -216,8 +279,7 @@ impl RttSequence {
     }
 
     pub fn mean(&self) -> Duration {
-        let avg =
-            self.rtts.iter().sum::<Duration>().as_nanos() / self.rtts.len() as u128;
+        let avg = self.rtts.iter().sum::<Duration>().as_nanos() / self.rtts.len() as u128;
         Duration::from_nanos(u64::try_from(avg).unwrap_or(u64::MAX))
     }
 
@@ -464,7 +526,9 @@ mod tests {
             match idx.cmp(&req.id) {
                 Ordering::Greater => continue,
                 Ordering::Equal => matched.push(idx),
-                Ordering::Less => { requests.push_front(req); }
+                Ordering::Less => {
+                    requests.push_front(req);
+                }
             }
             break;
         }
@@ -475,7 +539,9 @@ mod tests {
             match idx.cmp(&req.id) {
                 Ordering::Greater => continue,
                 Ordering::Equal => matched.push(idx),
-                Ordering::Less => { requests.push_front(req); }
+                Ordering::Less => {
+                    requests.push_front(req);
+                }
             }
             break;
         }
@@ -494,7 +560,9 @@ mod tests {
             match idx.cmp(&req.id) {
                 Ordering::Greater => continue,
                 Ordering::Equal => {}
-                Ordering::Less => { requests.push_front(req); }
+                Ordering::Less => {
+                    requests.push_front(req);
+                }
             }
             break;
         }
@@ -512,14 +580,19 @@ mod tests {
 
         let idx = 2;
         let mut skipped = Vec::new();
-        loop {
-            match requests.pop_front() {
-                Some(req) => match idx.cmp(&req.id) {
-                    Ordering::Greater => { skipped.push(req.id); continue; }
-                    Ordering::Equal => { break; }
-                    Ordering::Less => { requests.push_front(req); break; }
-                },
-                None => break,
+        while let Some(req) = requests.pop_front() {
+            match idx.cmp(&req.id) {
+                Ordering::Greater => {
+                    skipped.push(req.id);
+                    continue;
+                }
+                Ordering::Equal => {
+                    break;
+                }
+                Ordering::Less => {
+                    requests.push_front(req);
+                    break;
+                }
             }
         }
         assert_eq!(skipped, vec![0, 1]);
@@ -544,7 +617,9 @@ mod tests {
             match idx.cmp(&req.id) {
                 Ordering::Greater => continue,
                 Ordering::Equal => {}
-                Ordering::Less => { requests.push_front(req); }
+                Ordering::Less => {
+                    requests.push_front(req);
+                }
             }
             break;
         }
@@ -553,7 +628,10 @@ mod tests {
 
     #[tokio::test]
     async fn receive_timeout_removes_entry() {
-        let entry = Entry { id: 42, ts: Instant::now() };
+        let entry = Entry {
+            id: 42,
+            ts: Instant::now(),
+        };
         let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
 
         receive_timeout(42, req_mutex.clone(), Duration::from_millis(1), None).await;
@@ -565,9 +643,18 @@ mod tests {
     #[tokio::test]
     async fn receive_timeout_removes_older_entries() {
         let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
-            Entry { id: 0, ts: Instant::now() },
-            Entry { id: 1, ts: Instant::now() },
-            Entry { id: 2, ts: Instant::now() },
+            Entry {
+                id: 0,
+                ts: Instant::now(),
+            },
+            Entry {
+                id: 1,
+                ts: Instant::now(),
+            },
+            Entry {
+                id: 2,
+                ts: Instant::now(),
+            },
         ])));
 
         receive_timeout(1, req_mutex.clone(), Duration::from_millis(1), None).await;
@@ -580,8 +667,14 @@ mod tests {
     #[tokio::test]
     async fn receive_timeout_removes_entries_up_to_index() {
         let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
-            Entry { id: 3, ts: Instant::now() },
-            Entry { id: 7, ts: Instant::now() },
+            Entry {
+                id: 3,
+                ts: Instant::now(),
+            },
+            Entry {
+                id: 7,
+                ts: Instant::now(),
+            },
         ])));
 
         receive_timeout(5, req_mutex.clone(), Duration::from_millis(1), None).await;
@@ -593,17 +686,19 @@ mod tests {
 
     #[tokio::test]
     async fn receive_timeout_signals_generator() {
-        let entry = Entry { id: 0, ts: Instant::now() };
+        let entry = Entry {
+            id: 0,
+            ts: Instant::now(),
+        };
         let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
         let (gen_tx, mut gen_rx) = mpsc::channel(8);
 
         receive_timeout(0, req_mutex.clone(), Duration::from_millis(1), Some(gen_tx)).await;
 
-        let signal = tokio::time::timeout(Duration::from_millis(100), gen_rx.recv())
+        tokio::time::timeout(Duration::from_millis(100), gen_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(signal, ());
     }
 
     #[tokio::test]

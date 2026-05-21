@@ -2,6 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use rup::Protocol;
 use rup::pinger::PING_HDR_LEN;
 
 fn cli() -> Command {
@@ -100,14 +101,14 @@ fn cli() -> Command {
                 .short('p')
                 .help("Set protocol to use for ping")
                 .action(ArgAction::Set)
-                .value_parser(["tcp", "udp", "icmp"])
+                .value_parser(Protocol::VALUES)
                 .default_value("udp"),
         )
 }
 
 pub(crate) struct ServerParams {
     pub local_address: SocketAddr,
-    pub protocol: String,
+    pub protocol: Protocol,
 }
 
 pub(crate) struct PingerParams {
@@ -119,7 +120,7 @@ pub(crate) struct PingerParams {
     pub request_size: Option<u16>,
     pub response_size: Option<u16>,
     pub ping_number: Option<u64>,
-    pub protocol: String,
+    pub protocol: Protocol,
     pub run_time: Option<Duration>,
 }
 
@@ -131,11 +132,18 @@ pub(crate) enum CliParams {
 pub(crate) fn get_cli_params() -> CliParams {
     let matches = cli().get_matches();
 
-    let protocol = matches.get_one::<String>("protocol").unwrap().clone();
+    let protocol = matches
+        .get_one::<String>("protocol")
+        .unwrap()
+        .parse::<Protocol>()
+        .unwrap();
 
     match matches.subcommand() {
         Some(("client", submatch)) => CliParams::PingerParams(PingerParams {
-            remote_address: submatch.get_one::<String>("remote-address").unwrap().clone(),
+            remote_address: submatch
+                .get_one::<String>("remote-address")
+                .unwrap()
+                .clone(),
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
             interval: *submatch.get_one::<u64>("interval").unwrap(),
             adaptive: *submatch.get_one::<bool>("adaptive-interval").unwrap(),
@@ -166,11 +174,19 @@ mod tests {
     #[test]
     fn cli_client_defaults() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&["rup", "client", "127.0.0.1:5000"]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "client", "127.0.0.1:5000"])
+            .unwrap();
         assert_eq!(matches.subcommand_name(), Some("client"));
         let (_, sub) = matches.subcommand().unwrap();
-        assert_eq!(sub.get_one::<String>("remote-address").unwrap(), "127.0.0.1:5000");
-        assert_eq!(*sub.get_one::<SocketAddr>("local-address").unwrap(), SocketAddr::from(([0, 0, 0, 0], 0)));
+        assert_eq!(
+            sub.get_one::<String>("remote-address").unwrap(),
+            "127.0.0.1:5000"
+        );
+        assert_eq!(
+            *sub.get_one::<SocketAddr>("local-address").unwrap(),
+            SocketAddr::from(([0, 0, 0, 0], 0))
+        );
         assert_eq!(*sub.get_one::<u64>("interval").unwrap(), 1000);
         assert!(!*sub.get_one::<bool>("adaptive-interval").unwrap());
         assert_eq!(*sub.get_one::<u64>("wait-time").unwrap(), 1000);
@@ -181,19 +197,32 @@ mod tests {
     #[test]
     fn cli_client_all_options() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "client",
-            "10.0.0.1:8080",
-            "--local-address", "0.0.0.0:5000",
-            "-i", "500",
-            "-W", "2000",
-            "--request-size", "64",
-            "--response-size", "128",
-            "-n", "10",
-            "-t", "30",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from([
+                "rup",
+                "client",
+                "10.0.0.1:8080",
+                "--local-address",
+                "0.0.0.0:5000",
+                "-i",
+                "500",
+                "-W",
+                "2000",
+                "--request-size",
+                "64",
+                "--response-size",
+                "128",
+                "-n",
+                "10",
+                "-t",
+                "30",
+            ])
+            .unwrap();
         let (_, sub) = matches.subcommand().unwrap();
-        assert_eq!(sub.get_one::<String>("remote-address").unwrap(), "10.0.0.1:8080");
+        assert_eq!(
+            sub.get_one::<String>("remote-address").unwrap(),
+            "10.0.0.1:8080"
+        );
         assert_eq!(*sub.get_one::<u64>("interval").unwrap(), 500);
         assert_eq!(*sub.get_one::<u64>("wait-time").unwrap(), 2000);
         assert_eq!(*sub.get_one::<u16>("req-size").unwrap(), 64);
@@ -205,10 +234,9 @@ mod tests {
     #[test]
     fn cli_client_adaptive_mode() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "client", "127.0.0.1:5000",
-            "-A",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "client", "127.0.0.1:5000", "-A"])
+            .unwrap();
         let (_, sub) = matches.subcommand().unwrap();
         assert!(*sub.get_one::<bool>("adaptive-interval").unwrap());
     }
@@ -216,31 +244,25 @@ mod tests {
     #[test]
     fn cli_client_interval_conflicts_with_adaptive() {
         let cmd = cli();
-        let result = cmd.try_get_matches_from(&[
-            "rup", "client", "127.0.0.1:5000",
-            "-i", "500",
-            "-A",
-        ]);
+        let result =
+            cmd.try_get_matches_from(["rup", "client", "127.0.0.1:5000", "-i", "500", "-A"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn cli_client_req_size_minimum() {
         let cmd = cli();
-        let result = cmd.try_get_matches_from(&[
-            "rup", "client", "127.0.0.1:5000",
-            "--request-size", "11",
-        ]);
+        let result =
+            cmd.try_get_matches_from(["rup", "client", "127.0.0.1:5000", "--request-size", "11"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn cli_client_req_size_valid() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "client", "127.0.0.1:5000",
-            "--request-size", "12",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "client", "127.0.0.1:5000", "--request-size", "12"])
+            .unwrap();
         let (_, sub) = matches.subcommand().unwrap();
         assert_eq!(*sub.get_one::<u16>("req-size").unwrap(), 12);
     }
@@ -248,70 +270,73 @@ mod tests {
     #[test]
     fn cli_server_basic() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "server", "0.0.0.0:5000",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "server", "0.0.0.0:5000"])
+            .unwrap();
         assert_eq!(matches.subcommand_name(), Some("server"));
         let (_, sub) = matches.subcommand().unwrap();
-        assert_eq!(*sub.get_one::<SocketAddr>("local-address").unwrap(), SocketAddr::from(([0, 0, 0, 0], 5000)));
+        assert_eq!(
+            *sub.get_one::<SocketAddr>("local-address").unwrap(),
+            SocketAddr::from(([0, 0, 0, 0], 5000))
+        );
     }
 
     #[test]
     fn cli_protocol_flag_udp() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "-p", "udp", "client", "127.0.0.1:5000",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "-p", "udp", "client", "127.0.0.1:5000"])
+            .unwrap();
         assert_eq!(matches.get_one::<String>("protocol").unwrap(), "udp");
     }
 
     #[test]
     fn cli_protocol_flag_tcp() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "-p", "tcp", "client", "127.0.0.1:5000",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "-p", "tcp", "client", "127.0.0.1:5000"])
+            .unwrap();
         assert_eq!(matches.get_one::<String>("protocol").unwrap(), "tcp");
     }
 
     #[test]
     fn cli_protocol_flag_icmp() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "-p", "icmp", "client", "8.8.8.8",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "-p", "icmp", "client", "8.8.8.8"])
+            .unwrap();
         assert_eq!(matches.get_one::<String>("protocol").unwrap(), "icmp");
     }
 
     #[test]
     fn cli_protocol_default_udp() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&[
-            "rup", "client", "127.0.0.1:5000",
-        ]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "client", "127.0.0.1:5000"])
+            .unwrap();
         assert_eq!(matches.get_one::<String>("protocol").unwrap(), "udp");
     }
 
     #[test]
     fn cli_protocol_invalid() {
         let cmd = cli();
-        let result = cmd.try_get_matches_from(&[
-            "rup", "-p", "invalid", "client", "127.0.0.1:5000",
-        ]);
+        let result = cmd.try_get_matches_from(["rup", "-p", "invalid", "client", "127.0.0.1:5000"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn cli_client_no_remote_fails() {
         let cmd = cli();
-        let result = cmd.try_get_matches_from(&["rup", "client"]);
+        let result = cmd.try_get_matches_from(["rup", "client"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn cli_ping_number_and_run_time_both_optional() {
         let cmd = cli();
-        let matches = cmd.try_get_matches_from(&["rup", "client", "127.0.0.1:5000"]).unwrap();
+        let matches = cmd
+            .try_get_matches_from(["rup", "client", "127.0.0.1:5000"])
+            .unwrap();
         let (_, sub) = matches.subcommand().unwrap();
         assert!(sub.get_one::<u64>("ping-number").is_none());
         assert!(sub.get_one::<u64>("run-time").is_none());

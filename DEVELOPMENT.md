@@ -1,144 +1,155 @@
-# Development guide for rup
+# Development Guide
 
-## Testing harness
+`rup` is a single Rust crate with a library target and a CLI target.
+Most behavior lives in the library; `src/main.rs` is intentionally thin.
 
-Tests are written as `#[cfg(test)] mod tests` blocks inside each source file
-(not in a separate `tests/` directory). This follows Rust convention and keeps
-tests close to the code they exercise.
+## Source Map
 
-### Test infrastructure
+| File | Purpose |
+|------|---------|
+| `src/lib.rs` | Public API, `Pinger`, `PingConfig`, session orchestration, server dispatch |
+| `src/protocol.rs` | `Protocol` enum, parsing, display names, CLI value list |
+| `src/echo_codec.rs` | Shared UDP/TCP echo payload encoding and decoding |
+| `src/pinger.rs` | Request/response domain types, `Echo`, `SendMode`, request generator |
+| `src/statistics.rs` | RTT matching, timeout handling, live presenter, shared statistics helpers |
+| `src/transport/mod.rs` | `Transport` trait plus transmitter/receiver adapters |
+| `src/transport/async_udp.rs` | UDP client transport and UDP echo server |
+| `src/transport/async_tcp.rs` | TCP client transport and TCP echo server |
+| `src/transport/async_icmp.rs` | ICMP client transport using Linux ping sockets |
+| `src/cli.rs` | Clap command definition and CLI parameter extraction |
+| `src/main.rs` | Runtime setup and calls into library entry points |
 
-**MockTransport** (`src/transport/mod.rs` tests) — a `Transport` trait
-implementation that simulates network send/recv without real sockets:
+## Architecture
+
+The client pipeline is actor-like. Each stage communicates over Tokio channels:
+
+```text
+generator -> transmitter -> statista -> presenter or collector
+                 |              ^
+                 v              |
+              Transport -> receiver
+```
+
+The transport implementations only need to implement:
 
 ```rust
-struct MockTransport {
-    send_delay: Duration,
-    recv_responses: Vec<Response>,
-    recv_index: Arc<Mutex<usize>>,
+pub trait Transport: Send + Sync {
+    async fn send(&self, req: &Request) -> io::Result<Instant>;
+    async fn recv(&self) -> io::Result<Response>;
 }
 ```
 
-- `send()` always succeeds after `send_delay` and returns `Instant::now()`
-- `recv()` returns the next response from `recv_responses` in order, or
-  `io::Error` when exhausted
-- `Clone` is implemented (shared `recv_index` via `Arc`)
+`run_ping_session()` builds the quiet library path and returns `PingReport`.
+`run_ping_session_with_output()` adds the live CLI presenter. Both paths share
+the same matcher and timeout logic.
 
-**ErrorTransport** (`src/transport/mod.rs` tests) — always returns errors on
-both `send()` and `recv()`, used to test error propagation in transmitter and
-receiver adapters.
+## Public API Shape
 
-### Running tests
+The high-level API is:
+
+```rust
+let report = rup::Pinger::new("127.0.0.1:5000", "udp")
+    .count(5)
+    .run()
+    .await?;
+```
+
+The structured API is:
+
+```rust
+let mut config = rup::PingConfig::new("127.0.0.1:5000".to_string(), rup::Protocol::Udp);
+config.ping_number = Some(5);
+let report = rup::run_ping_session(config).await?;
+```
+
+The library must not terminate the process. Invalid user input should return
+`io::Result` errors from library functions and be printed by the CLI layer.
+
+## Adding A Protocol
+
+1. Add a transport implementation in `src/transport/async_<proto>.rs`.
+2. Implement `Transport` for the client transport type.
+3. Add the module to `src/transport/mod.rs`.
+4. Add a variant to `Protocol` in `src/protocol.rs`.
+5. Register client construction in `run_ping_session_inner()` in `src/lib.rs`.
+6. Register server support in `run_server()` if the protocol needs a `rup`
+   echo server.
+7. Add parser, packet, and transport tests.
+
+For protocols that share the existing echo payload, use `echo_codec`.
+
+## Testing
+
+Tests live next to the code they exercise in `#[cfg(test)]` modules.
+
+Run the normal validation set before committing:
 
 ```sh
-cargo test                # all 133+ tests
-cargo test -- --nocapture # show stdout (timeout/reorder messages, stats)
-cargo test <name>         # single test, e.g. cargo test generator_adaptive_mode
-cargo clippy              # zero warnings required
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-### Test organization by module
+Current suite size is 122 library tests, 14 binary tests, and 1 doctest.
 
-| File | Tests | What they cover |
-|------|-------|-----------------|
-| `src/pinger.rs` | 17 | `Echo` serialization (zero/max/field-order/invalid sizes), `Request` channel rounds trip, `generator` (interval/adaptive modes, ping-number limit, channel-close exit, adaptive signal-flow), `SendMode` creation |
-| `src/statistics.rs` | 24 | `RttSequence` (mean/median/std-dev/loss/edge-cases), `fmt_duration` boundaries, entry-matching algorithm (exact/reorder/skip-lost/put-back/empty/idempotent), `receive_timeout` (entry removal/up-to-index/signal-generator/empty-queue) |
-| `src/transport/mod.rs` | 11 | `transmitter` (single/multiple/sizes/send-error/channel-close/backpressure), `receiver` (single/multiple/recv-error/channel-close) |
-| `src/transport/async_icmp.rs` | 14 | Checksum (`csum16_add` wrap/no-wrap/both-max, `csum16_slice` even/odd/empty/single-byte), ICMP packet assembly (v4 header/v4 checksum-verify/v6 type/payload-offset/min-size/variable-size), `is_ipv6` detection |
-| `src/main.rs` | 17 | `has_port` (v4/v6/hostname/empty/multi-colons/non-numeric), `ensure_port` (preserves existing, appends `:0` for ICMP) |
-| `src/cli.rs` | 12 | CLI argument parsing: defaults, all-options, adaptive-mode, interval-vs-adaptive conflict, req-size validation (>12), server, protocol flags (udp/tcp/icmp/default/invalid), missing-address error |
+### Test Coverage By Area
 
-### Key testing patterns
+| File | What the tests cover |
+|------|----------------------|
+| `src/pinger.rs` | `Echo` serialization, request generation, interval/adaptive modes, channel shutdown |
+| `src/statistics.rs` | RTT statistics, formatting, entry matching, timeout helper behavior |
+| `src/transport/mod.rs` | Transmitter/receiver channel adapters, mock transports, error paths |
+| `src/transport/async_udp.rs` | Echo encoding/parsing and loopback UDP send/receive |
+| `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
+| `src/transport/async_icmp.rs` | ICMP packet assembly, checksums, response parsing, loopback ping when available |
+| `src/cli.rs` | CLI defaults, validation, protocol parsing, subcommand arguments |
+| `src/lib.rs` | Address helpers, high-level report statistics, unknown protocol errors |
 
-**Async generator tests** use `#[tokio::test]` and channel-based interaction:
+Some tests bind loopback sockets. In restricted sandboxes they may fail with
+`PermissionDenied`; run them outside the sandbox when validating real socket
+behavior.
 
-```rust
-#[tokio::test]
-async fn generator_incrementing_ids() {
-    let (tx, mut rx) = mpsc::channel(8);
-    tokio::spawn(generator(tx, SendMode::Interval(1), Some(3), None, None, None));
-    let mut ids = Vec::new();
-    for _ in 0..3 { ids.push(rx.recv().await.unwrap().id); }
-    assert_eq!(ids, vec![0, 1, 2]);
-}
+## Manual Testing
+
+```sh
+# Terminal 1
+cargo run --release -- server 127.0.0.1:5000
+
+# Terminal 2
+cargo run --release -- client -A -n 5 127.0.0.1:5000
+
+# TCP
+cargo run --release -- -p tcp server 127.0.0.1:5000
+cargo run --release -- -p tcp client 127.0.0.1:5000
+
+# ICMP
+cargo run --release -- -p icmp client 8.8.8.8
 ```
 
-**Entry-matching tests** directly manipulate `VecDeque<Entry>` to validate the
-statista matching algorithm without spawning tasks:
+Remember that `-p` is a root CLI option and must appear before the subcommand.
 
-```rust
-let mut requests = VecDeque::new();
-requests.push_back(Entry { id: 0, ts: Instant::now() });
-// ... simulate Close handling with Ordering::cmp ...
-```
+## Coverage
 
-**Timeout tests** spawn `receive_timeout()` with minimal wait durations
-(1 ms) so they complete quickly without `test-util` feature.
-
-**ICMP packet tests** build raw packets manually and verify header bytes,
-checksum correctness, and payload deserialization — no socket needed.
-
-## Code coverage
-
-### Prerequisites
+Install:
 
 ```sh
 cargo install cargo-llvm-cov
 ```
 
-### Measuring coverage
+Run:
 
 ```sh
-# Run tests with coverage instrumentation
 cargo llvm-cov
-
-# Generate HTML report (opens in browser)
-cargo llvm-cov --open
-
-# View coverage summary per file
 cargo llvm-cov --summary-only
+cargo llvm-cov --open
 ```
 
-`cargo-llvm-cov` uses LLVM's source-based code coverage
-(`-Cinstrument-coverage`) which is the official Rust coverage tool. It
-tracks which lines and branches are exercised by tests, including
-condition/decision coverage.
+Coverage numbers change as the test suite evolves, so avoid committing static
+coverage percentages unless they were just regenerated.
 
-### Current coverage
+## Notes
 
-| File | Lines | Regions | Notes |
-|------|-------|---------|-------|
-| `src/pinger.rs` | 97.74% | 98.21% | Echo serialization + generator paths |
-| `src/statistics.rs` | 82.54% | 83.76% | Matching logic, RttSequence stats, timeouts |
-| `src/transport/mod.rs` | 93.03% | 94.52% | Transmitter/receiver adapters, mocks |
-| `src/transport/async_icmp.rs` | 93.07% | 92.70% | Extracted `build_icmp_packet`/`try_parse_icmp_response` + loopback integration |
-| `src/transport/async_tcp.rs` | 69.16% | 71.90% | Extracted `build_tcp_echo`/`parse_tcp_header` + real socket tests; server loop untested |
-| `src/transport/async_udp.rs` | 76.86% | 78.32% | Extracted `build_udp_echo`/`parse_udp_response` + real socket tests; server loop untested |
-| `src/cli.rs` | 89.50% | 87.64% | Argument parsing; `get_cli_params()` uses `std::process::exit` |
-| `src/main.rs` | 46.30% | 49.00% | `has_port`/`ensure_port`/`spawn_tasks` tested; DNS + wiring not tested |
-| **Total** | **81.81%** | **82.52%** | |
-
-### Design for testability
-
-Each transport's I/O and protocol logic is cleanly separated:
-
-| Transport | Packet builder | Response parser | Test coverage |
-|-----------|---------------|-----------------|---------------|
-| ICMP | `build_icmp_packet(req, is_v6)` | `try_parse_icmp_response(buf, n, reply_type)` | ✓ unit tests for all branches + real ICMP ping to `127.0.0.1` |
-| UDP | `build_udp_echo(req)` | `parse_udp_response(buf)` | ✓ unit tests for sizes/error/edge cases + real loopback socket |
-| TCP | `build_tcp_echo(req)` | `parse_tcp_header(hdr)` | ✓ unit tests for sizes/edge cases + real loopback socket |
-
-All three production `send()`/`recv()` methods call these extracted functions,
-so the same logic is exercised by both unit tests and real I/O.
-
-### Uncovered areas
-
-- **TCP/UDP server loops** — `server_transport()` functions are infinite
-  loops with `tokio::select!` (listening + ctrl-c). Exercised manually.
-- **TCP/UDP I/O error paths** — `WouldBlock` branches (hard to trigger on
-  loopback), timeout branches (need artificial delay).
-- **main.rs wiring** — DNS resolution (`tokio::net::lookup_host`) and
-  protocol dispatch (`match protocol.as_str()`) require real network or
-  are tightly coupled to `main()`.
-- **CLI `get_cli_params()`** — calls `std::process::exit(1)` for invalid
-  input, which terminates the process and cannot be caught in tests.
+- TCP/UDP require `host:port`; ICMP accepts hosts without a port.
+- Server transports return `io::Result<()>` for setup failures such as bind
+  errors, but continue past per-client/per-packet errors where possible.
+- TCP and UDP use the shared echo payload format. ICMP wraps that payload in an
+  ICMP header and checksum handling.

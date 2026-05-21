@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +20,16 @@ pub fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
 }
 
 pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
+    server_transport_until(local_address, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+pub async fn server_transport_until(
+    local_address: SocketAddr,
+    shutdown: impl Future<Output = ()>,
+) -> io::Result<()> {
     println!("Running UDP server listening {local_address}");
 
     let sock = UdpSocket::bind(local_address).await.map_err(|e| {
@@ -30,6 +41,7 @@ pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
 
     let mut client_addrs: HashSet<SocketAddr> = HashSet::new();
     let mut buf = vec![0; u16::MAX as usize];
+    tokio::pin!(shutdown);
 
     loop {
         let (n, addr) = tokio::select! {
@@ -42,7 +54,7 @@ pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
                     }
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 println!("UDP server shutting down");
                 return Ok(());
             }

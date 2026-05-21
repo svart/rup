@@ -9,6 +9,7 @@ fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
         .version("0.5.1")
+        .subcommand_required(true)
         .subcommand(
             Command::new("client")
                 .about("Send requests to the remote side and measure RTT")
@@ -129,8 +130,12 @@ pub(crate) enum CliParams {
     PingerParams(PingerParams),
 }
 
-pub(crate) fn get_cli_params() -> CliParams {
-    let matches = cli().get_matches();
+pub(crate) fn get_cli_params_from<I, T>(args: I) -> Result<CliParams, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = cli().try_get_matches_from(args)?;
 
     let protocol = matches
         .get_one::<String>("protocol")
@@ -138,7 +143,7 @@ pub(crate) fn get_cli_params() -> CliParams {
         .parse::<Protocol>()
         .unwrap();
 
-    match matches.subcommand() {
+    Ok(match matches.subcommand() {
         Some(("client", submatch)) => CliParams::PingerParams(PingerParams {
             remote_address: submatch
                 .get_one::<String>("remote-address")
@@ -160,9 +165,16 @@ pub(crate) fn get_cli_params() -> CliParams {
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
             protocol,
         }),
-        _ => {
-            eprintln!("error: unrecognized subcommand");
-            std::process::exit(1);
+        _ => unreachable!("clap validates subcommands"),
+    })
+}
+
+pub(crate) fn get_cli_params() -> CliParams {
+    match get_cli_params_from(std::env::args_os()) {
+        Ok(params) => params,
+        Err(e) => {
+            let _ = e.print();
+            std::process::exit(2);
         }
     }
 }
@@ -310,5 +322,42 @@ mod tests {
         let (_, sub) = matches.subcommand().unwrap();
         assert!(sub.get_one::<u64>("ping-number").is_none());
         assert!(sub.get_one::<u64>("run-time").is_none());
+    }
+
+    #[test]
+    fn get_cli_params_from_client_args() {
+        let params =
+            get_cli_params_from(["rup", "-p", "tcp", "client", "-n", "2", "127.0.0.1:5000"])
+                .unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert_eq!(params.protocol, Protocol::Tcp);
+                assert_eq!(params.remote_address, "127.0.0.1:5000");
+                assert_eq!(params.ping_number, Some(2));
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn get_cli_params_from_server_args() {
+        let params = get_cli_params_from(["rup", "-p", "udp", "server", "127.0.0.1:5000"]).unwrap();
+
+        match params {
+            CliParams::ServerParams(params) => {
+                assert_eq!(params.protocol, Protocol::Udp);
+                assert_eq!(
+                    params.local_address,
+                    SocketAddr::from(([127, 0, 0, 1], 5000))
+                );
+            }
+            _ => panic!("expected server params"),
+        }
+    }
+
+    #[test]
+    fn get_cli_params_from_missing_subcommand_errors() {
+        assert!(get_cli_params_from(["rup"]).is_err());
     }
 }

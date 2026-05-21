@@ -39,3 +39,44 @@ impl FromStr for Protocol {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_protocols() {
+        assert_eq!("udp".parse::<Protocol>().unwrap(), Protocol::Udp);
+        assert_eq!("tcp".parse::<Protocol>().unwrap(), Protocol::Tcp);
+        assert_eq!("icmp".parse::<Protocol>().unwrap(), Protocol::Icmp);
+    }
+
+    #[test]
+    fn invalid_protocol_reports_value() {
+        assert_eq!(
+            "bad".parse::<Protocol>().unwrap_err(),
+            "unknown protocol: bad"
+        );
+    }
+
+    #[test]
+    fn display_protocols() {
+        assert_eq!(Protocol::Udp.to_string(), "udp");
+        assert_eq!(Protocol::Tcp.to_string(), "tcp");
+        assert_eq!(Protocol::Icmp.to_string(), "icmp");
+    }
+
+    #[test]
+    fn port_requirement_matches_transport() {
+        assert!(Protocol::Udp.requires_port());
+        assert!(Protocol::Tcp.requires_port());
+        assert!(!Protocol::Icmp.requires_port());
+    }
+
+    #[test]
+    fn values_match_parser() {
+        for value in Protocol::VALUES {
+            assert!(value.parse::<Protocol>().is_ok());
+        }
+    }
+}

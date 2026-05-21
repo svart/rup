@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -87,6 +88,16 @@ async fn server_connection_handler(mut sock: TcpStream) {
 }
 
 pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
+    server_transport_until(local_address, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+pub async fn server_transport_until(
+    local_address: SocketAddr,
+    shutdown: impl Future<Output = ()>,
+) -> io::Result<()> {
     println!("Running TCP server listening {local_address}");
     let listen_sock = TcpListener::bind(local_address).await.map_err(|e| {
         io::Error::new(
@@ -94,6 +105,7 @@ pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
             format!("server bind to {local_address} failed: {e}"),
         )
     })?;
+    tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
@@ -105,7 +117,7 @@ pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
                     Err(e) => eprintln!("Connection failed: {e}"),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 println!("TCP server shutting down");
                 return Ok(());
             }

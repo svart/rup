@@ -729,4 +729,154 @@ mod tests {
         let requests = req_mutex.lock().await;
         assert!(requests.is_empty());
     }
+
+    #[tokio::test]
+    async fn statista_collector_matches_open_close() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (result_tx, mut result_rx) = mpsc::channel(8);
+        let sent = Instant::now();
+        let received = sent + Duration::from_millis(5);
+
+        stat_tx
+            .send(StatEntry::Open(Entry { id: 7, ts: sent }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Close(Entry {
+                id: 7,
+                ts: received,
+            }))
+            .await
+            .unwrap();
+        drop(stat_tx);
+
+        let report =
+            statista_with_collector(stat_rx, None, Duration::from_secs(1), result_tx).await;
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 1);
+        assert_eq!(report.rtts, vec![Duration::from_millis(5)]);
+
+        let result = result_rx.recv().await.unwrap();
+        assert_eq!(result.seq, 7);
+        assert_eq!(result.rtt, Duration::from_millis(5));
+        assert!(result_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn statista_collector_reports_timeout_loss() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (result_tx, mut result_rx) = mpsc::channel(8);
+
+        stat_tx
+            .send(StatEntry::Open(Entry {
+                id: 0,
+                ts: Instant::now(),
+            }))
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(statista_with_collector(
+            stat_rx,
+            None,
+            Duration::from_millis(1),
+            result_tx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        drop(stat_tx);
+        let report = handle.await.unwrap();
+
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 0);
+        assert!(report.rtts.is_empty());
+        assert!(result_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn statista_timeout_signals_adaptive_generator() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (result_tx, _result_rx) = mpsc::channel(8);
+        let (gen_tx, mut gen_rx) = mpsc::channel(8);
+
+        stat_tx
+            .send(StatEntry::Open(Entry {
+                id: 0,
+                ts: Instant::now(),
+            }))
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(statista_with_collector(
+            stat_rx,
+            Some(gen_tx),
+            Duration::from_millis(1),
+            result_tx,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(100), gen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(stat_tx);
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn statista_skips_lost_entry_on_later_close() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (result_tx, mut result_rx) = mpsc::channel(8);
+        let sent = Instant::now();
+
+        stat_tx
+            .send(StatEntry::Open(Entry { id: 0, ts: sent }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Open(Entry { id: 1, ts: sent }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Close(Entry {
+                id: 1,
+                ts: sent + Duration::from_millis(3),
+            }))
+            .await
+            .unwrap();
+        drop(stat_tx);
+
+        let report =
+            statista_with_collector(stat_rx, None, Duration::from_secs(1), result_tx).await;
+        assert_eq!(report.sent, 2);
+        assert_eq!(report.received, 1);
+        assert_eq!(result_rx.recv().await.unwrap().seq, 1);
+    }
+
+    #[tokio::test]
+    async fn statista_ignores_close_before_open() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (result_tx, mut result_rx) = mpsc::channel(8);
+
+        stat_tx
+            .send(StatEntry::Close(Entry {
+                id: 0,
+                ts: Instant::now(),
+            }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Open(Entry {
+                id: 0,
+                ts: Instant::now(),
+            }))
+            .await
+            .unwrap();
+        drop(stat_tx);
+
+        let report =
+            statista_with_collector(stat_rx, None, Duration::from_secs(1), result_tx).await;
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 0);
+        assert!(result_rx.recv().await.is_none());
+    }
 }

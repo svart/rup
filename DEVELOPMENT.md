@@ -89,7 +89,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Current suite size is 122 library tests, 14 binary tests, and 1 doctest.
+Current suite size is 143 library tests, 17 binary tests, and 1 doctest.
 
 ### Test Coverage By Area
 

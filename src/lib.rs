@@ -44,6 +44,9 @@ pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
         return Ok(addr.to_string());
     }
     if protocol == Protocol::Icmp {
+        if addr.contains(':') && !addr.starts_with('[') {
+            return Ok(format!("[{addr}]:0"));
+        }
         return Ok(format!("{addr}:0"));
     }
     Err(io::Error::new(
@@ -53,14 +56,14 @@ pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
 }
 
 /// A single RTT measurement result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingResult {
     pub seq: u64,
     pub rtt: Duration,
 }
 
 /// Summary report from a completed ping session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingReport {
     pub rtts: Vec<Duration>,
     pub sent: u64,
@@ -239,11 +242,6 @@ pub async fn run_ping_session_with_output(config: PingConfig) -> io::Result<Ping
 }
 
 async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::Result<PingReport> {
-    let channel_cap = 1024;
-    let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(channel_cap);
-    let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(channel_cap);
-    let (result_send, mut result_recv) = mpsc::channel::<PingResult>(channel_cap);
-
     let addr = ensure_port(&config.remote, config.protocol)?;
     let remote_addr = match tokio::net::lookup_host(&addr).await {
         Ok(mut addrs) => match addrs.next() {
@@ -263,17 +261,10 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
         }
     };
 
-    let (send_mode, txtr_gen) = if config.adaptive {
-        let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(channel_cap);
-        (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
-    } else {
-        (SendMode::Interval(config.interval), None)
-    };
-
-    let (mut tx_handle, mut rx_handle) = match config.protocol {
+    match config.protocol {
         Protocol::Udp => {
             let transport = UdpClientTransport::new(config.local, remote_addr).await?;
-            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+            run_ping_with_transport(transport, config, print_output).await
         }
         Protocol::Tcp => {
             let sock = if remote_addr.is_ipv4() {
@@ -284,13 +275,37 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
             sock.bind(config.local)?;
             let stream = sock.connect(remote_addr).await?;
             let transport = TcpClientTransport::new(stream);
-            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+            run_ping_with_transport(transport, config, print_output).await
         }
         Protocol::Icmp => {
             let transport = IcmpClientTransport::new(config.local, remote_addr).await?;
-            spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send)
+            run_ping_with_transport(transport, config, print_output).await
         }
+    }
+}
+
+async fn run_ping_with_transport<T>(
+    transport: T,
+    config: PingConfig,
+    print_output: bool,
+) -> io::Result<PingReport>
+where
+    T: Transport + Clone + Send + 'static,
+{
+    let channel_cap = 1024;
+    let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(channel_cap);
+    let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(channel_cap);
+    let (result_send, mut result_recv) = mpsc::channel::<PingResult>(channel_cap);
+
+    let (send_mode, txtr_gen) = if config.adaptive {
+        let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(channel_cap);
+        (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
+    } else {
+        (SendMode::Interval(config.interval), None)
     };
+
+    let (mut tx_handle, mut rx_handle) =
+        spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send);
 
     let generator = tokio::spawn(pinger::generator(
         gen_txtr_send,
@@ -337,9 +352,17 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
 }
 
 pub async fn run_server(protocol: Protocol, local: SocketAddr) -> io::Result<()> {
+    run_server_until(protocol, local, std::future::pending()).await
+}
+
+pub async fn run_server_until(
+    protocol: Protocol,
+    local: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> io::Result<()> {
     match protocol {
-        Protocol::Tcp => transport::async_tcp::server_transport(local).await?,
-        Protocol::Udp => transport::async_udp::server_transport(local).await?,
+        Protocol::Tcp => transport::async_tcp::server_transport_until(local, shutdown).await?,
+        Protocol::Udp => transport::async_udp::server_transport_until(local, shutdown).await?,
         Protocol::Icmp => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -364,6 +387,48 @@ fn spawn_pinger_tasks<T: Transport + Clone + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    #[derive(Clone)]
+    struct ScriptedTransport {
+        replies: Arc<Mutex<VecDeque<u64>>>,
+        pending: Arc<Mutex<VecDeque<u64>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                replies: Arc::new(Mutex::new(responses.into_iter().collect())),
+                pending: Arc::new(Mutex::new(VecDeque::new())),
+            }
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        async fn send(&self, req: &Request) -> io::Result<Instant> {
+            let mut replies = self.replies.lock().await;
+            if replies.front() == Some(&req.id) {
+                replies.pop_front();
+                self.pending.lock().await.push_back(req.id);
+            }
+            Ok(Instant::now())
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            loop {
+                if let Some(id) = self.pending.lock().await.pop_front() {
+                    return Ok(Response {
+                        id,
+                        timestamp: Instant::now(),
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
 
     #[test]
     fn has_port_detects_v4_with_port() {
@@ -455,6 +520,11 @@ mod tests {
     }
 
     #[test]
+    fn ensure_port_brackets_unbracketed_icmp_v6() {
+        assert_eq!(ensure_port("::1", Protocol::Icmp).unwrap(), "[::1]:0");
+    }
+
+    #[test]
     fn ensure_port_adds_zero_for_icmp_hostname() {
         assert_eq!(
             ensure_port("localhost", Protocol::Icmp).unwrap(),
@@ -489,6 +559,244 @@ mod tests {
             .run()
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_ping_session_udp_loopback_report() {
+        use tokio::net::UdpSocket;
+
+        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut buf = vec![0; u16::MAX as usize];
+            for _ in 0..3 {
+                let (n, addr) = server_sock.recv_from(&mut buf).await.unwrap();
+                server_sock.send_to(&buf[..n], addr).await.unwrap();
+            }
+        });
+
+        let report = run_ping_session(PingConfig {
+            remote: server_addr.to_string(),
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol: Protocol::Udp,
+            interval: 1,
+            adaptive: false,
+            wait_time: Duration::from_millis(100),
+            request_size: None,
+            response_size: None,
+            ping_number: Some(3),
+            run_time: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 3);
+        assert_eq!(report.received, 3);
+        assert_eq!(report.rtts.len(), 3);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_ping_session_udp_no_response_reports_loss() {
+        use tokio::net::UdpSocket;
+
+        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let _ = server_sock.recv_from(&mut buf).await;
+        });
+
+        let report = run_ping_session(PingConfig {
+            remote: server_addr.to_string(),
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol: Protocol::Udp,
+            interval: 1,
+            adaptive: false,
+            wait_time: Duration::from_millis(5),
+            request_size: None,
+            response_size: None,
+            ping_number: Some(1),
+            run_time: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 0);
+        assert_eq!(report.loss_pct(), 100.0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_ping_session_tcp_loopback_report() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let mut hdr = [0; PING_HDR_LEN];
+                stream.read_exact(&mut hdr).await.unwrap();
+                let echo: Echo = bincode::deserialize(&hdr).unwrap();
+                if echo.len as usize > PING_HDR_LEN {
+                    let mut extra = vec![0; echo.len as usize - PING_HDR_LEN];
+                    stream.read_exact(&mut extra).await.unwrap();
+                }
+                stream.write_all(&hdr).await.unwrap();
+            }
+        });
+
+        let report = run_ping_session(PingConfig {
+            remote: server_addr.to_string(),
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol: Protocol::Tcp,
+            interval: 1,
+            adaptive: false,
+            wait_time: Duration::from_millis(100),
+            request_size: None,
+            response_size: None,
+            ping_number: Some(2),
+            run_time: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 2);
+        assert_eq!(report.received, 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_ping_session_udp_requires_port() {
+        let err = run_ping_session(PingConfig::new("localhost".to_string(), Protocol::Udp))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_reports_success() {
+        let report = run_ping_with_transport(
+            ScriptedTransport::new([0, 1, 2]),
+            PingConfig {
+                remote: "unused".to_string(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: 1,
+                adaptive: false,
+                wait_time: Duration::from_millis(100),
+                request_size: None,
+                response_size: None,
+                ping_number: Some(3),
+                run_time: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 3);
+        assert_eq!(report.received, 3);
+        assert_eq!(report.rtts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_reports_loss() {
+        let report = run_ping_with_transport(
+            ScriptedTransport::new([]),
+            PingConfig {
+                remote: "unused".to_string(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: 1,
+                adaptive: false,
+                wait_time: Duration::from_millis(2),
+                request_size: None,
+                response_size: None,
+                ping_number: Some(2),
+                run_time: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 2);
+        assert_eq!(report.received, 0);
+        assert_eq!(report.loss_pct(), 100.0);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_supports_adaptive_mode() {
+        let report = run_ping_with_transport(
+            ScriptedTransport::new([0, 1, 2]),
+            PingConfig {
+                remote: "unused".to_string(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: 1000,
+                adaptive: true,
+                wait_time: Duration::from_millis(100),
+                request_size: None,
+                response_size: None,
+                ping_number: Some(3),
+                run_time: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 3);
+        assert_eq!(report.received, 3);
+    }
+
+    #[tokio::test]
+    async fn run_server_rejects_icmp() {
+        let err = run_server_until(
+            Protocol::Icmp,
+            "127.0.0.1:0".parse().unwrap(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn run_server_propagates_tcp_bind_error() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let err = run_server_until(Protocol::Tcp, addr, std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn run_server_stops_on_injected_shutdown() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(run_server_until(
+            Protocol::Udp,
+            "127.0.0.1:0".parse().unwrap(),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

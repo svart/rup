@@ -86,15 +86,14 @@ async fn server_connection_handler(mut sock: TcpStream) {
     }
 }
 
-pub async fn server_transport(local_address: SocketAddr) {
+pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
     println!("Running TCP server listening {local_address}");
-    let listen_sock = match TcpListener::bind(local_address).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("server: binding failed: {e}");
-            return;
-        }
-    };
+    let listen_sock = TcpListener::bind(local_address).await.map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("server bind to {local_address} failed: {e}"),
+        )
+    })?;
 
     loop {
         tokio::select! {
@@ -108,7 +107,7 @@ pub async fn server_transport(local_address: SocketAddr) {
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("TCP server shutting down");
-                return;
+                return Ok(());
             }
         }
     }

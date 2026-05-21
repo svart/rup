@@ -69,11 +69,7 @@ pub struct PingReport {
 
 impl PingReport {
     pub fn loss_pct(&self) -> f64 {
-        if self.sent > 0 {
-            (self.sent - self.received) as f64 / self.sent as f64 * 100.0
-        } else {
-            0.0
-        }
+        statistics::loss_pct(self.sent, self.received)
     }
 
     pub fn min(&self) -> Option<Duration> {
@@ -85,32 +81,15 @@ impl PingReport {
     }
 
     pub fn mean(&self) -> Option<Duration> {
-        let n = self.rtts.len();
-        if n == 0 {
-            return None;
-        }
-        let avg = self.rtts.iter().sum::<Duration>().as_nanos() / n as u128;
-        Some(Duration::from_nanos(u64::try_from(avg).unwrap_or(u64::MAX)))
+        statistics::mean(&self.rtts)
     }
 
     pub fn median(&self) -> Option<Duration> {
-        let mut sorted = self.rtts.clone();
-        sorted.sort();
-        sorted.get(sorted.len() / 2).copied()
+        statistics::median(&self.rtts)
     }
 
     pub fn std_dev(&self) -> Option<Duration> {
-        let avg = self.mean()?;
-        let variance = self
-            .rtts
-            .iter()
-            .map(|value| {
-                let diff = avg.as_nanos().abs_diff(value.as_nanos());
-                diff * diff
-            })
-            .sum::<u128>() as f64
-            / self.rtts.len() as f64;
-        Some(Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.))
+        statistics::std_deviation(&self.rtts)
     }
 }
 
@@ -359,8 +338,8 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
 
 pub async fn run_server(protocol: Protocol, local: SocketAddr) -> io::Result<()> {
     match protocol {
-        Protocol::Tcp => transport::async_tcp::server_transport(local).await,
-        Protocol::Udp => transport::async_udp::server_transport(local).await,
+        Protocol::Tcp => transport::async_tcp::server_transport(local).await?,
+        Protocol::Udp => transport::async_udp::server_transport(local).await?,
         Protocol::Icmp => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

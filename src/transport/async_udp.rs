@@ -18,16 +18,15 @@ pub fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
     echo_codec::decode_response(buf)
 }
 
-pub async fn server_transport(local_address: SocketAddr) {
+pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
     println!("Running UDP server listening {local_address}");
 
-    let sock = match UdpSocket::bind(local_address).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("server: binding failed: {e}");
-            return;
-        }
-    };
+    let sock = UdpSocket::bind(local_address).await.map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("server bind to {local_address} failed: {e}"),
+        )
+    })?;
 
     let mut client_addrs: HashSet<SocketAddr> = HashSet::new();
     let mut buf = vec![0; u16::MAX as usize];
@@ -45,7 +44,7 @@ pub async fn server_transport(local_address: SocketAddr) {
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("UDP server shutting down");
-                return;
+                return Ok(());
             }
         };
 

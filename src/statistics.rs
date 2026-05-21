@@ -29,6 +29,42 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
+pub(crate) fn loss_pct(sent: u64, received: u64) -> f64 {
+    if sent > 0 {
+        (sent - received) as f64 / sent as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
+pub(crate) fn mean(rtts: &[Duration]) -> Option<Duration> {
+    if rtts.is_empty() {
+        return None;
+    }
+
+    let avg = rtts.iter().sum::<Duration>().as_nanos() / rtts.len() as u128;
+    Some(Duration::from_nanos(u64::try_from(avg).unwrap_or(u64::MAX)))
+}
+
+pub(crate) fn median(rtts: &[Duration]) -> Option<Duration> {
+    let mut sorted = rtts.to_vec();
+    sorted.sort();
+    sorted.get(sorted.len() / 2).copied()
+}
+
+pub(crate) fn std_deviation(rtts: &[Duration]) -> Option<Duration> {
+    let avg = mean(rtts)?;
+    let variance = rtts
+        .iter()
+        .map(|value| {
+            let diff = avg.as_nanos().abs_diff(value.as_nanos());
+            diff * diff
+        })
+        .sum::<u128>() as f64
+        / rtts.len() as f64;
+    Some(Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.))
+}
+
 #[cfg(test)]
 async fn receive_timeout(
     index: u64,
@@ -279,22 +315,11 @@ impl RttSequence {
     }
 
     pub fn mean(&self) -> Duration {
-        let avg = self.rtts.iter().sum::<Duration>().as_nanos() / self.rtts.len() as u128;
-        Duration::from_nanos(u64::try_from(avg).unwrap_or(u64::MAX))
+        mean(&self.rtts).unwrap_or_default()
     }
 
     pub fn std_deviation(&self) -> Duration {
-        let avg = self.mean();
-        let variance = self
-            .rtts
-            .iter()
-            .map(|value| {
-                let diff = avg.as_nanos().abs_diff(value.as_nanos());
-                diff * diff
-            })
-            .sum::<u128>() as f64
-            / self.rtts.len() as f64;
-        Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.)
+        std_deviation(&self.rtts).unwrap_or_default()
     }
 
     pub fn print_stats(&mut self) {
@@ -305,17 +330,13 @@ impl RttSequence {
 
         self.rtts.sort();
 
-        let loss_pct = if self.sent > 0 {
-            (self.sent - self.received) as f64 / self.sent as f64 * 100.0
-        } else {
-            0.0
-        };
+        let loss_pct = loss_pct(self.sent, self.received);
 
         let min = self.rtts[0];
         let max = self.rtts[self.rtts.len() - 1];
         let avg = self.mean();
         let std_dev = self.std_deviation();
-        let median = self.rtts[self.rtts.len() / 2];
+        let median = median(&self.rtts).unwrap_or_default();
 
         println!(
             "\n--- statistics ---\n\

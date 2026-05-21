@@ -69,6 +69,13 @@ fn cli() -> Command {
                         .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
                 )
                 .arg(
+                    Arg::new("tos")
+                        .long("tos")
+                        .help("Set outgoing IP TOS / IPv6 traffic class byte")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u8)),
+                )
+                .arg(
                     Arg::new("ping-number")
                         .long("ping-number")
                         .short('n')
@@ -120,6 +127,7 @@ pub(crate) struct PingerParams {
     pub wait_time: u64,
     pub request_size: Option<u16>,
     pub response_size: Option<u16>,
+    pub tos: Option<u8>,
     pub ping_number: Option<u64>,
     pub protocol: Protocol,
     pub run_time: Option<Duration>,
@@ -155,6 +163,7 @@ where
             wait_time: *submatch.get_one::<u64>("wait-time").unwrap(),
             request_size: submatch.get_one::<u16>("req-size").copied(),
             response_size: submatch.get_one::<u16>("resp-size").copied(),
+            tos: submatch.get_one::<u8>("tos").copied(),
             ping_number: submatch.get_one::<u64>("ping-number").copied(),
             protocol,
             run_time: submatch
@@ -210,6 +219,7 @@ mod tests {
         assert!(!*sub.get_one::<bool>("adaptive-interval").unwrap());
         assert_eq!(*sub.get_one::<u64>("wait-time").unwrap(), 1000);
         assert!(sub.get_one::<u16>("req-size").is_none());
+        assert!(sub.get_one::<u8>("tos").is_none());
         assert!(sub.get_one::<u64>("ping-number").is_none());
     }
 
@@ -229,6 +239,8 @@ mod tests {
             "64",
             "--response-size",
             "128",
+            "--tos",
+            "184",
             "-n",
             "10",
             "-t",
@@ -243,6 +255,7 @@ mod tests {
         assert_eq!(*sub.get_one::<u64>("wait-time").unwrap(), 2000);
         assert_eq!(*sub.get_one::<u16>("req-size").unwrap(), 64);
         assert_eq!(*sub.get_one::<u16>("resp-size").unwrap(), 128);
+        assert_eq!(*sub.get_one::<u8>("tos").unwrap(), 184);
         assert_eq!(*sub.get_one::<u64>("ping-number").unwrap(), 10);
         assert_eq!(*sub.get_one::<u64>("run-time").unwrap(), 30);
     }
@@ -269,6 +282,18 @@ mod tests {
         let matches = matches(["rup", "client", "127.0.0.1:5000", "--request-size", "12"]);
         let (_, sub) = matches.subcommand().unwrap();
         assert_eq!(*sub.get_one::<u16>("req-size").unwrap(), 12);
+    }
+
+    #[test]
+    fn cli_client_tos_valid() {
+        let matches = matches(["rup", "client", "127.0.0.1:5000", "--tos", "255"]);
+        let (_, sub) = matches.subcommand().unwrap();
+        assert_eq!(*sub.get_one::<u8>("tos").unwrap(), 255);
+    }
+
+    #[test]
+    fn cli_client_tos_invalid() {
+        assert!(try_matches(["rup", "client", "127.0.0.1:5000", "--tos", "256"]).is_err());
     }
 
     #[test]
@@ -335,6 +360,7 @@ mod tests {
                 assert_eq!(params.protocol, Protocol::Tcp);
                 assert_eq!(params.remote_address, "127.0.0.1:5000");
                 assert_eq!(params.ping_number, Some(2));
+                assert_eq!(params.tos, None);
             }
             _ => panic!("expected pinger params"),
         }

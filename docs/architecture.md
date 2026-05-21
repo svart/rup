@@ -44,6 +44,11 @@ UDP and TCP use a `rup` echo server. The server reads the shared `Echo` payload,
 swaps `resp_size` into `len`, clears `resp_size`, and sends a padded response of
 the requested size.
 
+Client sessions can set a full IP TOS / IPv6 traffic class byte. UDP servers
+receive packet TOS/TCLASS metadata with `recvmsg` where the platform supports
+it, then apply that byte to the echo response. TCP and ICMP support client-side
+outgoing TOS; there is no TCP or ICMP server-side reflection path.
+
 ICMP uses Linux ping sockets (`SOCK_DGRAM | IPPROTO_ICMP`) rather than raw
 sockets. The kernel handles identifier assignment; `rup` builds the ICMP header
 and embeds the same echo payload after it.

@@ -5,10 +5,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
 use crate::echo_codec;
 use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
+use crate::tos as traffic;
 use crate::transport::Transport;
 
 pub fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
@@ -32,7 +34,7 @@ pub async fn server_transport_until(
 ) -> io::Result<()> {
     println!("Running UDP server listening {local_address}");
 
-    let sock = UdpSocket::bind(local_address).await.map_err(|e| {
+    let sock = bind_server_socket(local_address).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("server bind to {local_address} failed: {e}"),
@@ -44,8 +46,8 @@ pub async fn server_transport_until(
     tokio::pin!(shutdown);
 
     loop {
-        let (n, addr) = tokio::select! {
-            result = sock.recv_from(&mut buf) => {
+        let (n, addr, packet_tos) = tokio::select! {
+            result = traffic::recv_from_with_tos(&sock, &mut buf) => {
                 match result {
                     Ok(r) => r,
                     Err(e) => {
@@ -86,10 +88,33 @@ pub async fn server_transport_until(
             }
         };
 
+        if let Some(tos_value) = packet_tos
+            && let Err(e) = traffic::set_udp_tos(&sock, addr, tos_value)
+        {
+            eprintln!("server: failed to reflect TOS {tos_value} to {addr}: {e}");
+        }
+
         if let Err(e) = sock.send_to(&send_buf, addr).await {
             eprintln!("server: send error to {addr}: {e}");
         }
     }
+}
+
+fn bind_server_socket(local_address: SocketAddr) -> io::Result<UdpSocket> {
+    let domain = if local_address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if let Err(e) = traffic::enable_socket_recv_tos(&sock, local_address) {
+        eprintln!("server: received TOS reflection disabled: {e}");
+    }
+    sock.bind(&local_address.into())?;
+    sock.set_nonblocking(true)?;
+
+    let std_sock: std::net::UdpSocket = sock.into();
+    UdpSocket::from_std(std_sock)
 }
 
 #[derive(Clone)]
@@ -99,9 +124,35 @@ pub struct UdpClientTransport {
 
 impl UdpClientTransport {
     pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
-        let socket = UdpSocket::bind(local)
-            .await
+        Self::new_with_tos(local, remote, None).await
+    }
+
+    pub async fn new_with_tos(
+        local: SocketAddr,
+        remote: SocketAddr,
+        tos: Option<u8>,
+    ) -> io::Result<Self> {
+        let domain = if remote.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+        sock.bind(&local.into())
             .map_err(|e| io::Error::new(e.kind(), format!("client bind to {local} failed: {e}")))?;
+        if let Some(tos_value) = tos {
+            traffic::set_socket_tos(&sock, remote, tos_value).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("set TOS {tos_value} for {remote} failed: {e}"),
+                )
+            })?;
+        }
+        sock.set_nonblocking(true)?;
+
+        let std_sock: std::net::UdpSocket = sock.into();
+        let socket = UdpSocket::from_std(std_sock)
+            .map_err(|e| io::Error::new(e.kind(), format!("into async socket: {e}")))?;
         socket.connect(remote).await.map_err(|e| {
             io::Error::new(e.kind(), format!("client connect to {remote} failed: {e}"))
         })?;
@@ -315,5 +366,49 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn udp_server_reflects_received_tos() -> io::Result<()> {
+        let reserved = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let server_addr = reserved.local_addr()?;
+        drop(reserved);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(server_transport_until(server_addr, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let client_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        crate::tos::enable_socket_recv_tos(&client_sock, client_addr)?;
+        crate::tos::set_socket_tos(&client_sock, server_addr, 0xb8)?;
+        client_sock.bind(&client_addr.into())?;
+        client_sock.set_nonblocking(true)?;
+        let client_std: std::net::UdpSocket = client_sock.into();
+        let client_sock = UdpSocket::from_std(client_std)?;
+
+        let req = Request {
+            id: 99,
+            request_size: None,
+            response_size: None,
+        };
+        let packet = build_udp_echo(&req)?;
+        client_sock.send_to(&packet, server_addr).await?;
+
+        let mut buf = [0u8; 64];
+        let (_, _, reflected_tos) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::tos::recv_from_with_tos(&client_sock, &mut buf),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for response"))??;
+
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap()?;
+
+        assert_eq!(reflected_tos, Some(0xb8));
+        Ok(())
     }
 }

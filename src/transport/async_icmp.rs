@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::echo_codec;
 use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
+use crate::tos as traffic;
 use crate::transport::Transport;
 
 const ICMP_HEADER_LEN: usize = 8;
@@ -83,6 +84,14 @@ pub struct IcmpClientTransport {
 
 impl IcmpClientTransport {
     pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
+        Self::new_with_tos(local, remote, None).await
+    }
+
+    pub async fn new_with_tos(
+        local: SocketAddr,
+        remote: SocketAddr,
+        tos: Option<u8>,
+    ) -> io::Result<Self> {
         let (domain, protocol) = if is_ipv6(&remote) {
             (Domain::IPV6, Protocol::ICMPV6)
         } else {
@@ -101,6 +110,14 @@ impl IcmpClientTransport {
 
         sock.bind(&local.into())
             .map_err(|e| io::Error::new(e.kind(), format!("bind: {e}")))?;
+        if let Some(tos_value) = tos {
+            traffic::set_socket_tos(&sock, remote, tos_value).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("set TOS {tos_value} for {remote} failed: {e}"),
+                )
+            })?;
+        }
         sock.set_nonblocking(true)
             .map_err(|e| io::Error::new(e.kind(), format!("set nonblocking: {e}")))?;
 

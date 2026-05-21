@@ -28,6 +28,7 @@ fn main() {
                     wait_time: Duration::from_millis(params.wait_time),
                     request_size: params.request_size,
                     response_size: params.response_size,
+                    tos: params.tos,
                     ping_number: params.ping_number,
                     run_time: params.run_time,
                 };

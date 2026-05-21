@@ -31,6 +31,7 @@ rup [OPTIONS] client [CLIENT_OPTIONS] <remote-address>
 | `-W`, `--wait-time <ms>` | Response timeout in milliseconds [default: 1000] |
 | `--request-size <bytes>` | Request packet size, minimum 12 bytes |
 | `--response-size <bytes>` | Response packet size, minimum 12 bytes |
+| `--tos <0-255>` | Outgoing IP TOS / IPv6 traffic class byte |
 | `--local-address <addr>` | Local bind address [default: `0.0.0.0:0`] |
 
 Examples:
@@ -41,6 +42,9 @@ rup client -A -n 10 127.0.0.1:5000
 
 # TCP with a custom request size.
 rup -p tcp client example.com:5000 --request-size 64
+
+# UDP with DSCP EF (`184`, `0xb8`) set on outgoing packets.
+rup client --tos 184 127.0.0.1:5000
 
 # ICMP via hostname. Port is not required.
 rup -p icmp client google.com
@@ -57,6 +61,11 @@ rup [OPTIONS] server <local-address>
 
 UDP and TCP use a `rup` echo server. ICMP does not: the remote kernel responds
 to echo requests directly.
+
+For UDP, the server reflects the received TOS / traffic class byte on echo
+responses when the operating system supplies that packet metadata. TCP and ICMP
+do not have a `rup` server-side reflection path; `--tos` still sets outgoing
+client packets for those protocols.
 
 ```sh
 rup server 0.0.0.0:5000

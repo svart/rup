@@ -18,6 +18,7 @@ use rup::Pinger;
 async fn main() -> std::io::Result<()> {
     let report = Pinger::new("127.0.0.1:5000", "udp")
         .count(5)
+        .tos(184)
         .interval(1000)
         .run()
         .await?;
@@ -43,6 +44,7 @@ Available builder methods:
 | `wait_time(ms)` | Set response timeout |
 | `request_size(bytes)` | Set request payload size |
 | `response_size(bytes)` | Ask UDP/TCP server for a response size |
+| `tos(byte)` | Set outgoing IP TOS / IPv6 traffic class byte |
 | `local(addr)` | Bind to a local socket address |
 | `run_time(duration)` | Stop after a duration |
 
@@ -57,6 +59,7 @@ use rup::{PingConfig, Protocol, run_ping_session};
 async fn main() -> std::io::Result<()> {
     let mut config = PingConfig::new("127.0.0.1:5000".to_string(), Protocol::Udp);
     config.ping_number = Some(5);
+    config.tos = Some(184);
 
     let report = run_ping_session(config).await?;
     println!("received {} replies", report.received);
@@ -67,6 +70,9 @@ async fn main() -> std::io::Result<()> {
 
 `run_ping_session()` returns a quiet `PingReport`. `run_ping_session_with_output()`
 uses the same session logic and prints live CLI-style output.
+
+`PingConfig::tos` is the full TOS / traffic class byte. UDP servers reflect the
+received byte on echo responses when available from the operating system.
 
 ## Report Values
 

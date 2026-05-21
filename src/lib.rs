@@ -2,6 +2,7 @@ pub mod echo_codec;
 pub mod pinger;
 pub mod protocol;
 pub mod statistics;
+mod tos;
 pub mod transport;
 
 pub use pinger::{Echo, Entry, PING_HDR_LEN, Request, Response, SendMode, StatEntry, generator};
@@ -122,6 +123,7 @@ pub struct Pinger {
     wait_time: u64,
     request_size: Option<u16>,
     response_size: Option<u16>,
+    tos: Option<u8>,
     ping_number: Option<u64>,
     run_time: Option<Duration>,
 }
@@ -137,6 +139,7 @@ impl Pinger {
             wait_time: 1000,
             request_size: None,
             response_size: None,
+            tos: None,
             ping_number: None,
             run_time: None,
         }
@@ -172,6 +175,11 @@ impl Pinger {
         self
     }
 
+    pub fn tos(mut self, tos: u8) -> Self {
+        self.tos = Some(tos);
+        self
+    }
+
     pub fn local(mut self, addr: SocketAddr) -> Self {
         self.local = addr;
         self
@@ -195,6 +203,7 @@ impl Pinger {
             wait_time: Duration::from_millis(self.wait_time),
             request_size: self.request_size,
             response_size: self.response_size,
+            tos: self.tos,
             ping_number: self.ping_number,
             run_time: self.run_time,
         })
@@ -212,6 +221,7 @@ pub struct PingConfig {
     pub wait_time: Duration,
     pub request_size: Option<u16>,
     pub response_size: Option<u16>,
+    pub tos: Option<u8>,
     pub ping_number: Option<u64>,
     pub run_time: Option<Duration>,
 }
@@ -227,6 +237,7 @@ impl PingConfig {
             wait_time: Duration::from_millis(1000),
             request_size: None,
             response_size: None,
+            tos: None,
             ping_number: None,
             run_time: None,
         }
@@ -263,7 +274,8 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
 
     match config.protocol {
         Protocol::Udp => {
-            let transport = UdpClientTransport::new(config.local, remote_addr).await?;
+            let transport =
+                UdpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
             run_ping_with_transport(transport, config, print_output).await
         }
         Protocol::Tcp => {
@@ -273,12 +285,16 @@ async fn run_ping_session_inner(config: PingConfig, print_output: bool) -> io::R
                 tokio::net::TcpSocket::new_v6()?
             };
             sock.bind(config.local)?;
+            if let Some(tos_value) = config.tos {
+                tos::set_tcp_tos(&sock, remote_addr, tos_value)?;
+            }
             let stream = sock.connect(remote_addr).await?;
             let transport = TcpClientTransport::new(stream);
             run_ping_with_transport(transport, config, print_output).await
         }
         Protocol::Icmp => {
-            let transport = IcmpClientTransport::new(config.local, remote_addr).await?;
+            let transport =
+                IcmpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
             run_ping_with_transport(transport, config, print_output).await
         }
     }
@@ -585,6 +601,7 @@ mod tests {
             wait_time: Duration::from_millis(100),
             request_size: None,
             response_size: None,
+            tos: None,
             ping_number: Some(3),
             run_time: None,
         })
@@ -617,6 +634,7 @@ mod tests {
             wait_time: Duration::from_millis(5),
             request_size: None,
             response_size: None,
+            tos: None,
             ping_number: Some(1),
             run_time: None,
         })
@@ -660,6 +678,7 @@ mod tests {
             wait_time: Duration::from_millis(100),
             request_size: None,
             response_size: None,
+            tos: None,
             ping_number: Some(2),
             run_time: None,
         })
@@ -692,6 +711,7 @@ mod tests {
                 wait_time: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
+                tos: None,
                 ping_number: Some(3),
                 run_time: None,
             },
@@ -718,6 +738,7 @@ mod tests {
                 wait_time: Duration::from_millis(2),
                 request_size: None,
                 response_size: None,
+                tos: None,
                 ping_number: Some(2),
                 run_time: None,
             },
@@ -744,6 +765,7 @@ mod tests {
                 wait_time: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
+                tos: None,
                 ping_number: Some(3),
                 run_time: None,
             },

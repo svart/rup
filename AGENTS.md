@@ -142,13 +142,15 @@ due to alignment padding).
 
 ### CLI (`-p` flag is global)
 ```
-rup [global opts] <subcommand> [subcommand opts]
+rup [global opts] [client opts] <remote-address>
+rup [global opts] server <local-address>
 ```
-`-p`/`--protocol` is defined at the root level (not inside subcommands), so it
-must come before the subcommand: `rup -p icmp client 8.8.8.8`.
+`-p`/`--protocol` is defined at the root level (not inside subcommands). For
+server mode, it must come before the subcommand: `rup -p tcp server 127.0.0.1:5000`.
 
-When `-p`/`--protocol` is omitted, `client` defaults to ICMP and `server`
-defaults to UDP. Parsed protocol is stored as `PingerParams.protocol`.
+Client mode is the default: `rup 8.8.8.8`. When `-p`/`--protocol` is omitted,
+client mode defaults to ICMP and server mode defaults to UDP. Parsed protocol is
+stored as `PingerParams.protocol`.
 
 ### Port handling
 - TCP/UDP require port in address (`host:port`)
@@ -176,13 +178,13 @@ cargo clippy               # must pass before committing (zero warnings)
 cargo run --release -- server 127.0.0.1:5000
 
 # Terminal 2: run client
-cargo run --release -- -p udp client -A -n 5 127.0.0.1:5000
+cargo run --release -- -p udp -A -n 5 127.0.0.1:5000
 
 # ICMP (no server needed)
-cargo run --release -- client 8.8.8.8
+cargo run --release -- 8.8.8.8
 
 # TCP
-cargo run --release -- -p tcp client 127.0.0.1:5000
+cargo run --release -- -p tcp 127.0.0.1:5000
 ```
 
 ## Known issues / TODOs

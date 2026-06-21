@@ -30,7 +30,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Current suite size is 143 library tests, 17 binary tests, and 1 doctest.
+Current suite size is 145 library tests, 22 binary tests, and 1 doctest.
 
 | File | What the tests cover |
 |------|----------------------|
@@ -40,7 +40,7 @@ Current suite size is 143 library tests, 17 binary tests, and 1 doctest.
 | `src/transport/async_udp.rs` | Echo encoding/parsing and loopback UDP send/receive |
 | `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
 | `src/transport/async_icmp.rs` | ICMP packet assembly, checksums, response parsing, loopback ping when available |
-| `src/cli.rs` | CLI defaults, validation, protocol parsing, subcommand arguments |
+| `src/cli.rs` | CLI defaults, validation, protocol parsing, server subcommand arguments |
 | `src/lib.rs` | Address helpers, high-level report statistics, session orchestration |
 
 Some tests bind loopback sockets. In restricted sandboxes they may fail with
@@ -54,17 +54,18 @@ behavior.
 cargo run --release -- server 127.0.0.1:5000
 
 # Terminal 2
-cargo run --release -- -p udp client -A -n 5 127.0.0.1:5000
+cargo run --release -- -p udp -A -n 5 127.0.0.1:5000
 
 # TCP
 cargo run --release -- -p tcp server 127.0.0.1:5000
-cargo run --release -- -p tcp client 127.0.0.1:5000
+cargo run --release -- -p tcp 127.0.0.1:5000
 
 # ICMP
-cargo run --release -- client 8.8.8.8
+cargo run --release -- 8.8.8.8
 ```
 
-Remember that `-p` is a root CLI option and must appear before the subcommand.
+Remember that `-p` is a root CLI option. For server mode, it must appear before
+the `server` subcommand.
 
 ## Coverage
 

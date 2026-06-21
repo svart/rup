@@ -1,25 +1,26 @@
 # CLI Usage
 
-`rup` has two subcommands:
+`rup` runs as a client by default. The only subcommand is `server`:
 
 ```text
-rup [OPTIONS] <COMMAND>
+rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
+rup [OPTIONS] server <local-address>
 
 Commands:
-  client  Send requests to the remote side and measure RTT
   server  Receive requests and send them back immediately
 
 Options:
   -p, --protocol <protocol>  udp, tcp, or icmp
 ```
 
-`-p` / `--protocol` is a root option, so it must appear before `client` or
-`server`. When omitted, `client` defaults to ICMP and `server` defaults to UDP.
+`-p` / `--protocol` is a root option. When used with `server`, it must appear
+before `server`. When omitted, client mode defaults to ICMP and server mode
+defaults to UDP.
 
 ## Client
 
 ```sh
-rup [OPTIONS] client [CLIENT_OPTIONS] <remote-address>
+rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 ```
 
 | Option | Description |
@@ -38,19 +39,19 @@ Examples:
 
 ```sh
 # ICMP is the default client protocol. Port is not required.
-rup client -n 10 google.com
+rup -n 10 google.com
 
 # Adaptive mode, 10 pings over UDP.
-rup -p udp client -A -n 10 127.0.0.1:5000
+rup -p udp -A -n 10 127.0.0.1:5000
 
 # TCP with a custom request size.
-rup -p tcp client example.com:5000 --request-size 64
+rup -p tcp example.com:5000 --request-size 64
 
 # UDP with DSCP EF (`184`, `0xb8`) set on outgoing packets.
-rup -p udp client --tos 184 127.0.0.1:5000
+rup -p udp --tos 184 127.0.0.1:5000
 
 # Five-second ICMP burst with a 50 ms interval.
-rup client -i 50 -t 5 8.8.8.8
+rup -i 50 -t 5 8.8.8.8
 ```
 
 ## Server

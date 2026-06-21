@@ -660,7 +660,7 @@ mod tests {
             for _ in 0..2 {
                 let mut hdr = [0; PING_HDR_LEN];
                 stream.read_exact(&mut hdr).await.unwrap();
-                let echo: Echo = bincode::deserialize(&hdr).unwrap();
+                let echo = echo_codec::decode_header(&hdr).unwrap();
                 if echo.len as usize > PING_HDR_LEN {
                     let mut extra = vec![0; echo.len as usize - PING_HDR_LEN];
                     stream.read_exact(&mut extra).await.unwrap();

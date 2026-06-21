@@ -192,7 +192,7 @@ mod tests {
         };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), PING_HDR_LEN);
-        let echo: Echo = bincode::deserialize(&buf).unwrap();
+        let echo = echo_codec::decode_header(&buf).unwrap();
         assert_eq!(echo.id, 10);
         assert_eq!(echo.len, PING_HDR_LEN as u16);
     }
@@ -206,7 +206,7 @@ mod tests {
         };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), 100);
-        let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
+        let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 42);
         assert_eq!(echo.len, 100);
     }
@@ -220,7 +220,7 @@ mod tests {
         };
         let buf = build_udp_echo(&req).unwrap();
         assert_eq!(buf.len(), 50);
-        let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
+        let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 7);
         assert_eq!(echo.len, 50);
         assert_eq!(echo.resp_size, 128);
@@ -234,7 +234,7 @@ mod tests {
             response_size: None,
         };
         let buf = build_udp_echo(&req).unwrap();
-        let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
+        let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0);
     }
 

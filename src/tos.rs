@@ -6,7 +6,7 @@ use tokio::net::{TcpSocket, UdpSocket};
 
 pub fn set_socket_tos(socket: &Socket, addr: SocketAddr, tos: u8) -> io::Result<()> {
     if addr.is_ipv4() {
-        socket.set_tos(tos as u32)
+        socket.set_tos_v4(tos as u32)
     } else {
         socket.set_tclass_v6(tos as u32)
     }
@@ -14,7 +14,7 @@ pub fn set_socket_tos(socket: &Socket, addr: SocketAddr, tos: u8) -> io::Result<
 
 pub fn enable_socket_recv_tos(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
     if addr.is_ipv4() {
-        socket.set_recv_tos(true)
+        socket.set_recv_tos_v4(true)
     } else {
         socket.set_recv_tclass_v6(true)
     }
@@ -23,7 +23,7 @@ pub fn enable_socket_recv_tos(socket: &Socket, addr: SocketAddr) -> io::Result<(
 pub fn set_udp_tos(socket: &UdpSocket, addr: SocketAddr, tos: u8) -> io::Result<()> {
     let socket = SockRef::from(socket);
     if addr.is_ipv4() {
-        socket.set_tos(tos as u32)
+        socket.set_tos_v4(tos as u32)
     } else {
         socket.set_tclass_v6(tos as u32)
     }
@@ -32,7 +32,7 @@ pub fn set_udp_tos(socket: &UdpSocket, addr: SocketAddr, tos: u8) -> io::Result<
 pub fn set_tcp_tos(socket: &TcpSocket, addr: SocketAddr, tos: u8) -> io::Result<()> {
     let socket = SockRef::from(socket);
     if addr.is_ipv4() {
-        socket.set_tos(tos as u32)
+        socket.set_tos_v4(tos as u32)
     } else {
         socket.set_tclass_v6(tos as u32)
     }

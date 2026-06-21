@@ -203,8 +203,8 @@ mod tests {
         assert_eq!(packet[6], 0xAB);
         assert_eq!(packet[7], 0xCD);
 
-        let echo: Echo =
-            bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        let echo =
+            echo_codec::decode_header(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0xABCD);
         assert_eq!(echo.len, PING_HDR_LEN as u16);
         assert_eq!(echo.resp_size, 0);
@@ -251,8 +251,8 @@ mod tests {
             let verify = csum16_slice(&packet);
             assert_eq!(verify, 0, "checksum valid for size={size}");
 
-            let echo: Echo =
-                bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+            let echo = echo_codec::decode_header(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN])
+                .unwrap();
             assert_eq!(echo.id, 10);
             assert_eq!(echo.len, size);
         }
@@ -267,8 +267,8 @@ mod tests {
         };
         let packet = build_icmp_packet(&req, false).unwrap();
 
-        let echo: Echo =
-            bincode::deserialize(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
+        let echo =
+            echo_codec::decode_header(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 42);
         assert_eq!(echo.len, 100);
         assert_eq!(echo.resp_size, 200);

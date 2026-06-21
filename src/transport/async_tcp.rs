@@ -232,7 +232,7 @@ mod tests {
         };
         let buf = build_tcp_echo(&req).unwrap();
         assert_eq!(buf.len(), PING_HDR_LEN);
-        let echo: Echo = bincode::deserialize(&buf).unwrap();
+        let echo = echo_codec::decode_header(&buf).unwrap();
         assert_eq!(echo.id, 10);
         assert_eq!(echo.len, PING_HDR_LEN as u16);
     }
@@ -257,7 +257,7 @@ mod tests {
             response_size: Some(200),
         };
         let buf = build_tcp_echo(&req).unwrap();
-        let echo: Echo = bincode::deserialize(&buf[..PING_HDR_LEN]).unwrap();
+        let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 5);
         assert_eq!(echo.resp_size, 200);
     }
@@ -337,7 +337,7 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let mut hdr = [0; PING_HDR_LEN];
             server_stream.read_exact(&mut hdr).await.unwrap();
-            let echo: Echo = bincode::deserialize(&hdr).unwrap();
+            let echo = echo_codec::decode_header(&hdr).unwrap();
             let remaining = echo.len as usize - PING_HDR_LEN;
             if remaining > 0 {
                 let mut extra = vec![0; remaining];
@@ -401,7 +401,7 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let mut hdr = [0; PING_HDR_LEN];
             server_stream.read_exact(&mut hdr).await.unwrap();
-            let echo: Echo = bincode::deserialize(&hdr).unwrap();
+            let echo = echo_codec::decode_header(&hdr).unwrap();
             let remaining = echo.len as usize - PING_HDR_LEN;
             if remaining > 0 {
                 let mut extra = vec![0; remaining];

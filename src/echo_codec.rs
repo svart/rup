@@ -21,8 +21,18 @@ pub fn decode_header(buf: &[u8]) -> io::Result<Echo> {
         ));
     }
 
-    bincode::deserialize(&buf[..PING_HDR_LEN])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("deserialize: {e}")))
+    let mut id = [0; 8];
+    id.copy_from_slice(&buf[0..8]);
+    let mut len = [0; 2];
+    len.copy_from_slice(&buf[8..10]);
+    let mut resp_size = [0; 2];
+    resp_size.copy_from_slice(&buf[10..PING_HDR_LEN]);
+
+    Ok(Echo {
+        id: u64::from_le_bytes(id),
+        len: u16::from_le_bytes(len),
+        resp_size: u16::from_le_bytes(resp_size),
+    })
 }
 
 pub fn decode_response(buf: &[u8]) -> io::Result<Response> {
@@ -42,8 +52,10 @@ pub fn encode_response(mut echo: Echo) -> io::Result<Vec<u8>> {
 }
 
 pub fn encode_echo(echo: &Echo, len: usize) -> io::Result<Vec<u8>> {
-    let mut buf = bincode::serialize(echo)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}")))?;
+    let mut buf = Vec::with_capacity(len.max(PING_HDR_LEN));
+    buf.extend_from_slice(&echo.id.to_le_bytes());
+    buf.extend_from_slice(&echo.len.to_le_bytes());
+    buf.extend_from_slice(&echo.resp_size.to_le_bytes());
     buf.resize(len, 0);
     Ok(buf)
 }

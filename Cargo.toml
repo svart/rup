@@ -1,7 +1,7 @@
 [package]
 name = "rup"
 description = "rup is a universal pinger"
-version = "0.5.1"
+version = "0.6.0"
 repository = "https://github.com/svart/rup"
 authors = ["Dmitry Shinkaruk <dimashink@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -21,9 +21,8 @@ codegen-units = 1
 strip = true
 
 [dependencies]
-bincode = "1"
 clap = "4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-socket2 = { version = "0.5.7", features = ["all"] }
+socket2 = { version = "0.6.4", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "signal", "sync", "net", "io-util"] }

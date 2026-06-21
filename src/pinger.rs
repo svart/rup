@@ -109,6 +109,7 @@ pub async fn generator(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::echo_codec;
 
     #[test]
     fn ping_hdr_len_correct() {
@@ -122,8 +123,8 @@ mod tests {
             len: 100,
             resp_size: 64,
         };
-        let bytes = bincode::serialize(&echo).unwrap();
-        let decoded: Echo = bincode::deserialize(&bytes).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
+        let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, 42);
         assert_eq!(decoded.len, 100);
         assert_eq!(decoded.resp_size, 64);
@@ -137,9 +138,9 @@ mod tests {
             len: 0,
             resp_size: 0,
         };
-        let bytes = bincode::serialize(&echo).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
         assert_eq!(bytes.len(), PING_HDR_LEN);
-        let decoded: Echo = bincode::deserialize(&bytes).unwrap();
+        let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, 0);
         assert_eq!(decoded.len, 0);
         assert_eq!(decoded.resp_size, 0);
@@ -152,9 +153,9 @@ mod tests {
             len: u16::MAX,
             resp_size: u16::MAX,
         };
-        let bytes = bincode::serialize(&echo).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
         assert_eq!(bytes.len(), PING_HDR_LEN);
-        let decoded: Echo = bincode::deserialize(&bytes).unwrap();
+        let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, u64::MAX);
         assert_eq!(decoded.len, u16::MAX);
         assert_eq!(decoded.resp_size, u16::MAX);
@@ -167,7 +168,7 @@ mod tests {
             len: 2,
             resp_size: 3,
         };
-        let bytes = bincode::serialize(&echo).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
         assert_eq!(bytes[0..8], 1u64.to_le_bytes());
         assert_eq!(bytes[8..10], 2u16.to_le_bytes());
         assert_eq!(bytes[10..12], 3u16.to_le_bytes());
@@ -175,13 +176,13 @@ mod tests {
 
     #[test]
     fn echo_deserialize_invalid_too_short() {
-        let result: Result<Echo, _> = bincode::deserialize(&[0u8; 4]);
+        let result = echo_codec::decode_header(&[0u8; 4]);
         assert!(result.is_err());
     }
 
     #[test]
     fn echo_deserialize_extra_bytes_ignored() {
-        let result: Result<Echo, _> = bincode::deserialize(&[0u8; 20]);
+        let result = echo_codec::decode_header(&[0u8; 20]);
         assert!(result.is_ok());
         let echo = result.unwrap();
         assert_eq!(echo.id, 0);

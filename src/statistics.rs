@@ -91,6 +91,7 @@ async fn receive_timeout(
 }
 
 enum StatSink {
+    None,
     Presenter(Sender<PingRTT>),
     Collector(Sender<PingResult>),
     Both {
@@ -107,6 +108,7 @@ async fn signal_generator(to_generator: &Option<Sender<()>>) {
 
 async fn emit_ping(sink: &StatSink, index: u64, rtt: Duration) -> bool {
     match sink {
+        StatSink::None => true,
         StatSink::Presenter(sender) => sender.send(PingRTT { index, rtt }).await.is_ok(),
         StatSink::Collector(sender) => sender.send(PingResult { seq: index, rtt }).await.is_ok(),
         StatSink::Both {
@@ -214,6 +216,22 @@ pub async fn statista(
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
 ) {
+    let _ = statista_with_presenter(from_transport, to_generator, wait_time).await;
+}
+
+pub(crate) async fn statista_report(
+    from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+) -> crate::PingReport {
+    run_statista_core(from_transport, to_generator, wait_time, StatSink::None).await
+}
+
+pub(crate) async fn statista_with_presenter(
+    from_transport: Receiver<StatEntry>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+) -> crate::PingReport {
     let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
     let (sent_tx, sent_rx) = oneshot::channel();
 
@@ -228,6 +246,7 @@ pub async fn statista(
     .await;
 
     let _ = sent_tx.send(report.sent);
+    report
 }
 
 pub async fn statista_with_collector(

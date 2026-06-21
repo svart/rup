@@ -311,7 +311,6 @@ where
     let channel_cap = 1024;
     let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(channel_cap);
     let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(channel_cap);
-    let (result_send, mut result_recv) = mpsc::channel::<PingResult>(channel_cap);
 
     let (send_mode, txtr_gen) = if config.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(channel_cap);
@@ -333,18 +332,16 @@ where
     ));
 
     let statista = if print_output {
-        tokio::spawn(statistics::statista_with_presenter_and_collector(
+        tokio::spawn(statistics::statista_with_presenter(
             txtr_stat_recv,
             txtr_gen,
             config.wait_time,
-            result_send,
         ))
     } else {
-        tokio::spawn(statistics::statista_with_collector(
+        tokio::spawn(statistics::statista_report(
             txtr_stat_recv,
             txtr_gen,
             config.wait_time,
-            result_send,
         ))
     };
 
@@ -358,7 +355,6 @@ where
     drop(tx_handle);
     drop(rx_handle);
 
-    while result_recv.recv().await.is_some() {}
     let _ = generator.await;
     let stat_report = statista
         .await
@@ -414,7 +410,22 @@ mod tests {
         pending: Arc<Mutex<VecDeque<u64>>>,
     }
 
+    #[derive(Clone)]
+    struct OrderedScriptedTransport {
+        replies: Arc<Mutex<VecDeque<u64>>>,
+        pending: Arc<Mutex<VecDeque<u64>>>,
+    }
+
     impl ScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                replies: Arc::new(Mutex::new(responses.into_iter().collect())),
+                pending: Arc::new(Mutex::new(VecDeque::new())),
+            }
+        }
+    }
+
+    impl OrderedScriptedTransport {
         fn new(responses: impl IntoIterator<Item = u64>) -> Self {
             Self {
                 replies: Arc::new(Mutex::new(responses.into_iter().collect())),
@@ -442,6 +453,34 @@ mod tests {
                     });
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    impl Transport for OrderedScriptedTransport {
+        async fn send(&self, req: &Request) -> io::Result<Instant> {
+            let mut replies = self.replies.lock().await;
+            if replies.front() == Some(&req.id) {
+                replies.pop_front();
+                let pending = self.pending.clone();
+                let id = req.id;
+                tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    pending.lock().await.push_back(id);
+                });
+            }
+            Ok(Instant::now())
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            loop {
+                if let Some(id) = self.pending.lock().await.pop_front() {
+                    return Ok(Response {
+                        id,
+                        timestamp: Instant::now(),
+                    });
+                }
+                tokio::task::yield_now().await;
             }
         }
     }
@@ -723,6 +762,38 @@ mod tests {
         assert_eq!(report.sent, 3);
         assert_eq!(report.received, 3);
         assert_eq!(report.rtts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_handles_many_responses() {
+        let count = 2050;
+        let report = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_ping_with_transport(
+                OrderedScriptedTransport::new(0..count),
+                PingConfig {
+                    remote: "unused".to_string(),
+                    local: "0.0.0.0:0".parse().unwrap(),
+                    protocol: Protocol::Udp,
+                    interval: 1000,
+                    adaptive: true,
+                    wait_time: Duration::from_millis(100),
+                    request_size: None,
+                    response_size: None,
+                    tos: None,
+                    ping_number: Some(count),
+                    run_time: None,
+                },
+                false,
+            ),
+        )
+        .await
+        .expect("ping session should not stall after channel capacity")
+        .unwrap();
+
+        assert_eq!(report.sent, count);
+        assert_eq!(report.received, count);
+        assert_eq!(report.rtts.len() as u64, count);
     }
 
     #[tokio::test]

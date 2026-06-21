@@ -25,5 +25,5 @@ bincode = "1"
 clap = "4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-socket2 = "0.5.7"
+socket2 = { version = "0.5.7", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "signal", "sync", "net", "io-util"] }

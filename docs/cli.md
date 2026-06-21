@@ -10,11 +10,11 @@ Commands:
   server  Receive requests and send them back immediately
 
 Options:
-  -p, --protocol <protocol>  udp, tcp, or icmp [default: udp]
+  -p, --protocol <protocol>  udp, tcp, or icmp
 ```
 
 `-p` / `--protocol` is a root option, so it must appear before `client` or
-`server`.
+`server`. When omitted, `client` defaults to ICMP and `server` defaults to UDP.
 
 ## Client
 
@@ -37,20 +37,20 @@ rup [OPTIONS] client [CLIENT_OPTIONS] <remote-address>
 Examples:
 
 ```sh
+# ICMP is the default client protocol. Port is not required.
+rup client -n 10 google.com
+
 # Adaptive mode, 10 pings over UDP.
-rup client -A -n 10 127.0.0.1:5000
+rup -p udp client -A -n 10 127.0.0.1:5000
 
 # TCP with a custom request size.
 rup -p tcp client example.com:5000 --request-size 64
 
 # UDP with DSCP EF (`184`, `0xb8`) set on outgoing packets.
-rup client --tos 184 127.0.0.1:5000
+rup -p udp client --tos 184 127.0.0.1:5000
 
-# ICMP via hostname. Port is not required.
-rup -p icmp client google.com
-
-# Five-second burst with a 50 ms interval.
-rup client -i 50 -t 5 127.0.0.1:5000
+# Five-second ICMP burst with a 50 ms interval.
+rup client -i 50 -t 5 8.8.8.8
 ```
 
 ## Server

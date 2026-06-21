@@ -6,19 +6,19 @@ a Rust library.
 ## Quick Start
 
 ```sh
+# ICMP is the default client protocol and does not need a rup server.
+rup client -n 5 8.8.8.8
+
 # UDP needs a rup echo server.
 rup server 127.0.0.1:5000
-rup client -n 5 127.0.0.1:5000
+rup -p udp client -n 5 127.0.0.1:5000
 
 # Set outgoing IP TOS / IPv6 traffic class.
-rup client --tos 184 -n 5 127.0.0.1:5000
+rup -p udp client --tos 184 -n 5 127.0.0.1:5000
 
 # TCP uses the same command shape. -p is a root option.
 rup -p tcp server 127.0.0.1:5000
 rup -p tcp client -n 5 127.0.0.1:5000
-
-# ICMP does not need a rup server.
-rup -p icmp client -n 5 8.8.8.8
 ```
 
 UDP/TCP addresses require `host:port`. ICMP accepts `host` or `host:port`; the

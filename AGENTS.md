@@ -147,7 +147,8 @@ rup [global opts] <subcommand> [subcommand opts]
 `-p`/`--protocol` is defined at the root level (not inside subcommands), so it
 must come before the subcommand: `rup -p icmp client 8.8.8.8`.
 
-Protocol string is stored as `PingerParams.protocol` (owned `String`).
+When `-p`/`--protocol` is omitted, `client` defaults to ICMP and `server`
+defaults to UDP. Parsed protocol is stored as `PingerParams.protocol`.
 
 ### Port handling
 - TCP/UDP require port in address (`host:port`)
@@ -175,10 +176,10 @@ cargo clippy               # must pass before committing (zero warnings)
 cargo run --release -- server 127.0.0.1:5000
 
 # Terminal 2: run client
-cargo run --release -- client -A -n 5 127.0.0.1:5000
+cargo run --release -- -p udp client -A -n 5 127.0.0.1:5000
 
 # ICMP (no server needed)
-cargo run --release -- -p icmp client 8.8.8.8
+cargo run --release -- client 8.8.8.8
 
 # TCP
 cargo run --release -- -p tcp client 127.0.0.1:5000

@@ -8,7 +8,7 @@ use rup::pinger::PING_HDR_LEN;
 fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
-        .version("0.5.1")
+        .version("0.6.2")
         .subcommand_required(true)
         .subcommand(
             Command::new("client")
@@ -109,9 +109,15 @@ fn cli() -> Command {
                 .short('p')
                 .help("Set protocol to use for ping")
                 .action(ArgAction::Set)
-                .value_parser(Protocol::VALUES)
-                .default_value("udp"),
+                .value_parser(Protocol::VALUES),
         )
+}
+
+fn protocol_or_default(matches: &clap::ArgMatches, default: Protocol) -> Protocol {
+    matches
+        .get_one::<String>("protocol")
+        .map(|protocol| protocol.parse::<Protocol>().unwrap())
+        .unwrap_or(default)
 }
 
 pub(crate) struct ServerParams {
@@ -145,12 +151,6 @@ where
 {
     let matches = cli().try_get_matches_from(args)?;
 
-    let protocol = matches
-        .get_one::<String>("protocol")
-        .unwrap()
-        .parse::<Protocol>()
-        .unwrap();
-
     Ok(match matches.subcommand() {
         Some(("client", submatch)) => CliParams::PingerParams(PingerParams {
             remote_address: submatch
@@ -165,14 +165,14 @@ where
             response_size: submatch.get_one::<u16>("resp-size").copied(),
             tos: submatch.get_one::<u8>("tos").copied(),
             ping_number: submatch.get_one::<u64>("ping-number").copied(),
-            protocol,
+            protocol: protocol_or_default(&matches, Protocol::Icmp),
             run_time: submatch
                 .get_one::<u64>("run-time")
                 .map(|d| Duration::from_secs(*d)),
         }),
         Some(("server", submatch)) => CliParams::ServerParams(ServerParams {
             local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
-            protocol,
+            protocol: protocol_or_default(&matches, Protocol::Udp),
         }),
         _ => unreachable!("clap validates subcommands"),
     })
@@ -326,9 +326,27 @@ mod tests {
     }
 
     #[test]
-    fn cli_protocol_default_udp() {
-        let matches = matches(["rup", "client", "127.0.0.1:5000"]);
-        assert_eq!(matches.get_one::<String>("protocol").unwrap(), "udp");
+    fn cli_client_protocol_defaults_to_icmp() {
+        let params = get_cli_params_from(["rup", "client", "8.8.8.8"]).unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert_eq!(params.protocol, Protocol::Icmp);
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn cli_server_protocol_defaults_to_udp() {
+        let params = get_cli_params_from(["rup", "server", "127.0.0.1:5000"]).unwrap();
+
+        match params {
+            CliParams::ServerParams(params) => {
+                assert_eq!(params.protocol, Protocol::Udp);
+            }
+            _ => panic!("expected server params"),
+        }
     }
 
     #[test]

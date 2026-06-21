@@ -54,14 +54,14 @@ behavior.
 cargo run --release -- server 127.0.0.1:5000
 
 # Terminal 2
-cargo run --release -- client -A -n 5 127.0.0.1:5000
+cargo run --release -- -p udp client -A -n 5 127.0.0.1:5000
 
 # TCP
 cargo run --release -- -p tcp server 127.0.0.1:5000
 cargo run --release -- -p tcp client 127.0.0.1:5000
 
 # ICMP
-cargo run --release -- -p icmp client 8.8.8.8
+cargo run --release -- client 8.8.8.8
 ```
 
 Remember that `-p` is a root CLI option and must appear before the subcommand.

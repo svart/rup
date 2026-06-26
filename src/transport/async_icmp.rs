@@ -58,6 +58,7 @@ pub fn try_parse_icmp_response(
     buf: &[u8],
     n: usize,
     reply_type: u8,
+    ttl: Option<u8>,
 ) -> io::Result<Option<Response>> {
     if n < DATA_OFFSET + PING_HDR_LEN {
         return Ok(None);
@@ -73,6 +74,8 @@ pub fn try_parse_icmp_response(
     Ok(Some(Response {
         id: echo.id,
         timestamp: Instant::now(),
+        size: n,
+        ttl,
     }))
 }
 
@@ -118,6 +121,9 @@ impl IcmpClientTransport {
                 )
             })?;
         }
+        if let Err(e) = enable_socket_recv_ttl(&sock, remote) {
+            eprintln!("ICMP received TTL disabled: {e}");
+        }
         sock.set_nonblocking(true)
             .map_err(|e| io::Error::new(e.kind(), format!("set nonblocking: {e}")))?;
 
@@ -145,7 +151,7 @@ impl Transport for IcmpClientTransport {
         let reply_type: u8 = if is_ipv6(&self.remote) { 129 } else { 0 };
 
         loop {
-            let (n, addr) = match self.sock.recv_from(&mut buf).await {
+            let (n, addr, ttl) = match recv_from_with_ttl(&self.sock, &mut buf).await {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -154,11 +160,153 @@ impl Transport for IcmpClientTransport {
                 continue;
             }
 
-            if let Some(resp) = try_parse_icmp_response(&buf, n, reply_type)? {
+            if let Some(resp) = try_parse_icmp_response(&buf, n, reply_type, ttl)? {
                 return Ok(resp);
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn enable_socket_recv_ttl(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let enabled: libc::c_int = 1;
+    let (level, optname) = if addr.is_ipv4() {
+        (libc::IPPROTO_IP, libc::IP_RECVTTL)
+    } else {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT)
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            optname,
+            (&enabled as *const libc::c_int).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn enable_socket_recv_ttl(_socket: &Socket, _addr: SocketAddr) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn recv_from_with_ttl(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u8>)> {
+    use std::mem;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    use std::os::fd::AsRawFd;
+
+    use tokio::io::Interest;
+
+    loop {
+        socket.readable().await?;
+
+        let fd = socket.as_raw_fd();
+        match socket.try_io(Interest::READABLE, || {
+            let mut storage: libc::sockaddr_storage = unsafe { mem::zeroed() };
+            let mut control = [0u8; 128];
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
+            };
+            let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+            msg.msg_name = (&mut storage as *mut libc::sockaddr_storage).cast();
+            msg.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = control.len();
+
+            let n = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let addr = match storage.ss_family as libc::c_int {
+                libc::AF_INET
+                    if msg.msg_namelen as usize >= mem::size_of::<libc::sockaddr_in>() =>
+                {
+                    let addr =
+                        unsafe { *(std::ptr::addr_of!(storage).cast::<libc::sockaddr_in>()) };
+                    SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
+                        u16::from_be(addr.sin_port),
+                    ))
+                }
+                libc::AF_INET6
+                    if msg.msg_namelen as usize >= mem::size_of::<libc::sockaddr_in6>() =>
+                {
+                    let addr =
+                        unsafe { *(std::ptr::addr_of!(storage).cast::<libc::sockaddr_in6>()) };
+                    SocketAddr::V6(SocketAddrV6::new(
+                        Ipv6Addr::from(addr.sin6_addr.s6_addr),
+                        u16::from_be(addr.sin6_port),
+                        addr.sin6_flowinfo,
+                        addr.sin6_scope_id,
+                    ))
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "recvmsg returned an unsupported socket address",
+                    ));
+                }
+            };
+
+            let ttl = unsafe { parse_ttl_cmsg(&msg) };
+            Ok((n as usize, addr, ttl))
+        }) {
+            Ok(result) => return Ok(result),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn recv_from_with_ttl(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u8>)> {
+    let (n, addr) = socket.recv_from(buf).await?;
+    Ok((n, addr, None))
+}
+
+#[cfg(unix)]
+unsafe fn parse_ttl_cmsg(msg: &libc::msghdr) -> Option<u8> {
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
+    while !cmsg.is_null() {
+        let level = unsafe { (*cmsg).cmsg_level };
+        let ty = unsafe { (*cmsg).cmsg_type };
+        if (level == libc::IPPROTO_IP && (ty == libc::IP_TTL || ty == libc::IP_RECVTTL))
+            || (level == libc::IPPROTO_IPV6 && ty == libc::IPV6_HOPLIMIT)
+        {
+            let data = unsafe { libc::CMSG_DATA(cmsg) };
+            let data_len = unsafe { (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize };
+            if data_len >= std::mem::size_of::<libc::c_int>() {
+                let value = unsafe { std::ptr::read_unaligned(data.cast::<libc::c_int>()) };
+                return u8::try_from(value).ok();
+            }
+            if data_len >= 1 {
+                return Some(unsafe { *data });
+            }
+        }
+        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+    }
+    None
 }
 
 fn csum16_add(x: u16, y: u16) -> u16 {
@@ -287,9 +435,12 @@ mod tests {
         let mut reply = send_pkt.clone();
         reply[0] = 0;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        let result = try_parse_icmp_response(&reply, reply.len(), 0, Some(64)).unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, 7);
+        let result = result.unwrap();
+        assert_eq!(result.id, 7);
+        assert_eq!(result.size, reply.len());
+        assert_eq!(result.ttl, Some(64));
     }
 
     #[test]
@@ -305,7 +456,7 @@ mod tests {
         reply[0] = 3;
         reply[1] = 0;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        let result = try_parse_icmp_response(&reply, reply.len(), 0, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -321,20 +472,20 @@ mod tests {
         let mut reply = send_pkt.clone();
         reply[1] = 1;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0).unwrap();
+        let result = try_parse_icmp_response(&reply, reply.len(), 0, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn try_parse_icmp_too_short() {
-        let result = try_parse_icmp_response(&[0u8; 4], 4, 0).unwrap();
+        let result = try_parse_icmp_response(&[0u8; 4], 4, 0, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn try_parse_icmp_just_below_minimum() {
         let buf = vec![0u8; DATA_OFFSET + PING_HDR_LEN - 1];
-        let result = try_parse_icmp_response(&buf, buf.len(), 0).unwrap();
+        let result = try_parse_icmp_response(&buf, buf.len(), 0, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -343,7 +494,7 @@ mod tests {
         let mut buf = vec![0xffu8; DATA_OFFSET + PING_HDR_LEN];
         buf[0] = 0;
         buf[1] = 0;
-        let result = try_parse_icmp_response(&buf, buf.len(), 0).unwrap();
+        let result = try_parse_icmp_response(&buf, buf.len(), 0, None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, u64::MAX);
     }
@@ -360,7 +511,7 @@ mod tests {
         let mut reply = send_pkt.clone();
         reply[0] = 129;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 129).unwrap();
+        let result = try_parse_icmp_response(&reply, reply.len(), 129, None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, 10);
     }

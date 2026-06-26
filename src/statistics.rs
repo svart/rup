@@ -83,8 +83,13 @@ async fn signal_generator(to_generator: &Option<Sender<()>>) {
     }
 }
 
-async fn emit_reply(sink: &StatSink, seq: u64, rtt: Duration) {
-    let result = PingResult { seq, rtt };
+async fn emit_reply(sink: &StatSink, seq: u64, rtt: Duration, size: usize, ttl: Option<u8>) {
+    let result = PingResult {
+        seq,
+        rtt,
+        size,
+        ttl,
+    };
 
     match sink {
         StatSink::None => {}
@@ -156,10 +161,10 @@ async fn run_statista_core(
                                     continue;
                                 }
                                 Ordering::Equal => {
-                                    let rtt = t.ts.duration_since(req.ts);
+                                    let rtt = t.timestamp.duration_since(req.ts);
                                     rtts.push(rtt);
                                     signal_generator(&to_generator).await;
-                                    emit_reply(&sink, index, rtt).await;
+                                    emit_reply(&sink, index, rtt, t.size, t.ttl).await;
                                 }
                                 Ordering::Less => requests.push_front(req),
                             }
@@ -607,9 +612,11 @@ mod tests {
             .await
             .unwrap();
         stat_tx
-            .send(StatEntry::Close(Entry {
+            .send(StatEntry::Close(crate::Response {
                 id: 7,
-                ts: received,
+                timestamp: received,
+                size: 128,
+                ttl: Some(64),
             }))
             .await
             .unwrap();
@@ -624,6 +631,8 @@ mod tests {
         let result = result_rx.recv().await.unwrap();
         assert_eq!(result.seq, 7);
         assert_eq!(result.rtt, Duration::from_millis(5));
+        assert_eq!(result.size, 128);
+        assert_eq!(result.ttl, Some(64));
         assert!(result_rx.recv().await.is_none());
     }
 
@@ -702,9 +711,11 @@ mod tests {
             .await
             .unwrap();
         stat_tx
-            .send(StatEntry::Close(Entry {
+            .send(StatEntry::Close(crate::Response {
                 id: 1,
-                ts: sent + Duration::from_millis(3),
+                timestamp: sent + Duration::from_millis(3),
+                size: 0,
+                ttl: None,
             }))
             .await
             .unwrap();
@@ -723,9 +734,11 @@ mod tests {
         let (result_tx, mut result_rx) = mpsc::channel(8);
 
         stat_tx
-            .send(StatEntry::Close(Entry {
+            .send(StatEntry::Close(crate::Response {
                 id: 0,
-                ts: Instant::now(),
+                timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
             }))
             .await
             .unwrap();
@@ -760,9 +773,11 @@ mod tests {
             .await
             .unwrap();
         stat_tx
-            .send(StatEntry::Close(Entry {
+            .send(StatEntry::Close(crate::Response {
                 id: 1,
-                ts: sent + Duration::from_millis(3),
+                timestamp: sent + Duration::from_millis(3),
+                size: 64,
+                ttl: Some(63),
             }))
             .await
             .unwrap();
@@ -796,6 +811,8 @@ mod tests {
             PingEvent::Reply(PingResult {
                 seq: 1,
                 rtt: Duration::from_millis(3),
+                size: 64,
+                ttl: Some(63),
             })
         );
         assert_eq!(

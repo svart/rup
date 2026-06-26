@@ -214,6 +214,8 @@ impl Transport for TcpClientTransport {
         Ok(Response {
             id: echo.id,
             timestamp: Instant::now(),
+            size: echo.len as usize,
+            ttl: None,
         })
     }
 }

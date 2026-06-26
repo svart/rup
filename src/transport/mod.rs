@@ -48,7 +48,7 @@ pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>)
             result = transport.recv() => {
                 match result {
                     Ok(req) => {
-                        let s = StatEntry::Close(Entry{id: req.id, ts: req.timestamp});
+                        let s = StatEntry::Close(req);
                         if to_statista.send(s).await.is_err() {
                             break;
                         }
@@ -104,23 +104,23 @@ mod tests {
         }
 
         async fn recv(&self) -> io::Result<Response> {
-            let id = {
+            let response = {
                 let mut idx = self.recv_index.lock().unwrap();
                 if *idx < self.recv_responses.len() {
-                    let id = self.recv_responses[*idx].id;
+                    let response = self.recv_responses[*idx].clone();
                     *idx += 1;
-                    Some(id)
+                    Some(response)
                 } else {
                     None
                 }
             };
 
             tokio::time::sleep(std::time::Duration::from_micros(1)).await;
-            match id {
-                Some(id) => Ok(Response {
-                    id,
-                    timestamp: Instant::now(),
-                }),
+            match response {
+                Some(mut response) => {
+                    response.timestamp = Instant::now();
+                    Ok(response)
+                }
                 None => Err(io::Error::other("no more responses")),
             }
         }
@@ -157,6 +157,8 @@ mod tests {
         let transport = MockTransport::new(vec![Response {
             id: 3,
             timestamp: Instant::now(),
+            size: 12,
+            ttl: Some(64),
         }]);
 
         let handle = tokio::spawn(async move {
@@ -169,7 +171,11 @@ mod tests {
             .unwrap();
 
         match entry {
-            StatEntry::Close(e) => assert_eq!(e.id, 3),
+            StatEntry::Close(response) => {
+                assert_eq!(response.id, 3);
+                assert_eq!(response.size, 12);
+                assert_eq!(response.ttl, Some(64));
+            }
             _ => panic!("expected Close entry"),
         }
 
@@ -307,6 +313,8 @@ mod tests {
         let transport = MockTransport::new(vec![Response {
             id: 0,
             timestamp: Instant::now(),
+            size: 0,
+            ttl: None,
         }]);
 
         let handle = tokio::spawn(receiver(transport, stat_tx));
@@ -339,14 +347,20 @@ mod tests {
             Response {
                 id: 0,
                 timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
             },
             Response {
                 id: 1,
                 timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
             },
             Response {
                 id: 2,
                 timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
             },
         ]);
 

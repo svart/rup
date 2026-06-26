@@ -36,10 +36,10 @@ rup = { git = "https://github.com/svart/rup" }
 ```
 
 ```rust
-use rup::Pinger;
+use rup::{Pinger, Protocol};
 
 # async fn example() -> std::io::Result<()> {
-let report = Pinger::new("127.0.0.1:5000", "udp")
+let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
     .count(5)
     .tos(184)
     .interval(1000)

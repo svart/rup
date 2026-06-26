@@ -37,9 +37,9 @@ rup = { git = "https://github.com/svart/rup" }
 ### High-level API (easiest integration)
 
 ```rust
-use rup::Pinger;
+use rup::{Pinger, Protocol};
 
-let report = Pinger::new("127.0.0.1:5000", "udp")
+let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
     .count(5)
     .interval(1000)
     .run()
@@ -62,7 +62,7 @@ All core types are publicly accessible:
 - `rup::PingSession`, `rup::PingEvent` — consume live ping results with `next().await`
 - `rup::RttSequence` — compute min/med/avg/std_dev statistics
 - `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
-- `rup::PingResult` — individual RTT measurement `{seq: u64, rtt: Duration}`
+- `rup::PingResult` — individual RTT measurement `{seq, rtt, size, ttl}`
 - `rup::has_port()`, `rup::ensure_port()` — address helpers
 
 ## Architecture
@@ -194,4 +194,3 @@ cargo run --release -- -p tcp 127.0.0.1:5000
 - `statista` exits immediately when receiver is aborted — pending timeout events
   may be skipped after the transport tasks have already ended
 - No jitter/mean deviation in statistics (only std_dev)
-- `Response.size` field was removed; packet size statistics not tracked

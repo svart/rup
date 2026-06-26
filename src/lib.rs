@@ -15,7 +15,6 @@ pub use transport::{Transport, receiver, transmitter};
 
 use std::io;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -62,6 +61,8 @@ pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
 pub struct PingResult {
     pub seq: u64,
     pub rtt: Duration,
+    pub size: usize,
+    pub ttl: Option<u8>,
 }
 
 /// Live event produced by a running ping session.
@@ -140,10 +141,10 @@ impl PingSession {
 /// # Example
 ///
 /// ```no_run
-/// use rup::Pinger;
+/// use rup::{Pinger, Protocol};
 ///
 /// # async fn example() -> std::io::Result<()> {
-/// let report = Pinger::new("127.0.0.1:5000", "udp")
+/// let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
 ///     .count(5)
 ///     .interval(1000)
 ///     .run()
@@ -153,9 +154,9 @@ impl PingSession {
 /// # }
 /// ```
 pub struct Pinger {
-    remote: String,
+    remote: SocketAddr,
     local: SocketAddr,
-    protocol: String,
+    protocol: Protocol,
     interval: u64,
     adaptive: bool,
     wait_time: u64,
@@ -167,11 +168,11 @@ pub struct Pinger {
 }
 
 impl Pinger {
-    pub fn new<S: Into<String>>(remote: S, protocol: S) -> Self {
+    pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
         Pinger {
-            remote: remote.into(),
+            remote,
             local: "0.0.0.0:0".parse().unwrap(),
-            protocol: protocol.into(),
+            protocol,
             interval: 1000,
             adaptive: false,
             wait_time: 1000,
@@ -229,13 +230,10 @@ impl Pinger {
     }
 
     pub async fn run(self) -> io::Result<PingReport> {
-        let protocol = Protocol::from_str(&self.protocol)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
         run_ping_session(PingConfig {
             remote: self.remote,
             local: self.local,
-            protocol,
+            protocol: self.protocol,
             interval: self.interval,
             adaptive: self.adaptive,
             wait_time: Duration::from_millis(self.wait_time),
@@ -251,7 +249,7 @@ impl Pinger {
 
 #[derive(Clone, Debug)]
 pub struct PingConfig {
-    pub remote: String,
+    pub remote: SocketAddr,
     pub local: SocketAddr,
     pub protocol: Protocol,
     pub interval: u64,
@@ -265,7 +263,7 @@ pub struct PingConfig {
 }
 
 impl PingConfig {
-    pub fn new(remote: String, protocol: Protocol) -> Self {
+    pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
         Self {
             remote,
             local: "0.0.0.0:0".parse().unwrap(),
@@ -303,24 +301,7 @@ async fn spawn_ping_session(
     config: PingConfig,
     events: Option<mpsc::Sender<PingEvent>>,
 ) -> io::Result<JoinHandle<io::Result<PingReport>>> {
-    let addr = ensure_port(&config.remote, config.protocol)?;
-    let remote_addr = match tokio::net::lookup_host(&addr).await {
-        Ok(mut addrs) => match addrs.next() {
-            Some(a) => a,
-            None => {
-                return Err(io::Error::other(format!(
-                    "no addresses found for {}",
-                    config.remote
-                )));
-            }
-        },
-        Err(e) => {
-            return Err(io::Error::other(format!(
-                "failed to resolve '{}': {}",
-                config.remote, e
-            )));
-        }
-    };
+    let remote_addr = config.remote;
 
     match config.protocol {
         Protocol::Udp => {
@@ -523,6 +504,8 @@ mod tests {
                     return Ok(Response {
                         id,
                         timestamp: Instant::now(),
+                        size: 0,
+                        ttl: None,
                     });
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -551,6 +534,8 @@ mod tests {
                     return Ok(Response {
                         id,
                         timestamp: Instant::now(),
+                        size: 0,
+                        ttl: None,
                     });
                 }
                 tokio::task::yield_now().await;
@@ -680,13 +665,13 @@ mod tests {
         assert!(report.std_dev().is_none());
     }
 
-    #[tokio::test]
-    async fn pinger_errors_on_unknown_protocol() {
-        let result = Pinger::new("127.0.0.1:5000", "unknown")
-            .count(1)
-            .run()
-            .await;
-        assert!(result.is_err());
+    #[test]
+    fn ping_config_new_uses_resolved_socket_address() {
+        let remote = "127.0.0.1:5000".parse().unwrap();
+        let config = PingConfig::new(remote, Protocol::Udp);
+
+        assert_eq!(config.remote, remote);
+        assert_eq!(config.protocol, Protocol::Udp);
     }
 
     #[tokio::test]
@@ -705,7 +690,7 @@ mod tests {
         });
 
         let report = run_ping_session(PingConfig {
-            remote: server_addr.to_string(),
+            remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Udp,
             interval: 1,
@@ -738,7 +723,7 @@ mod tests {
         });
 
         let report = run_ping_session(PingConfig {
-            remote: server_addr.to_string(),
+            remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Udp,
             interval: 1,
@@ -782,7 +767,7 @@ mod tests {
         });
 
         let report = run_ping_session(PingConfig {
-            remote: server_addr.to_string(),
+            remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Tcp,
             interval: 1,
@@ -803,19 +788,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ping_session_udp_requires_port() {
-        let err = run_ping_session(PingConfig::new("localhost".to_string(), Protocol::Udp))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[tokio::test]
     async fn run_ping_with_transport_reports_success() {
         let report = run_ping_with_transport(
             ScriptedTransport::new([0, 1, 2]),
             PingConfig {
-                remote: "unused".to_string(),
+                remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
                 interval: 1,
@@ -845,7 +822,7 @@ mod tests {
             run_ping_with_transport(
                 OrderedScriptedTransport::new(0..count),
                 PingConfig {
-                    remote: "unused".to_string(),
+                    remote: "127.0.0.1:0".parse().unwrap(),
                     local: "0.0.0.0:0".parse().unwrap(),
                     protocol: Protocol::Udp,
                     interval: 1000,
@@ -874,7 +851,7 @@ mod tests {
         let report = run_ping_with_transport(
             ScriptedTransport::new([]),
             PingConfig {
-                remote: "unused".to_string(),
+                remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
                 interval: 1,
@@ -901,7 +878,7 @@ mod tests {
         let report = run_ping_with_transport(
             ScriptedTransport::new([0, 1, 2]),
             PingConfig {
-                remote: "unused".to_string(),
+                remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
                 interval: 1000,
@@ -927,7 +904,7 @@ mod tests {
         let mut session = start_ping_with_transport(
             ScriptedTransport::new([0, 1]),
             PingConfig {
-                remote: "unused".to_string(),
+                remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
                 interval: 1,

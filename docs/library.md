@@ -12,11 +12,11 @@ rup = { git = "https://github.com/svart/rup" }
 Use `Pinger` for simple sessions:
 
 ```rust
-use rup::Pinger;
+use rup::{Pinger, Protocol};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let report = Pinger::new("127.0.0.1:5000", "udp")
+    let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
         .count(5)
         .tos(184)
         .interval(1000)
@@ -50,14 +50,15 @@ Available builder methods:
 
 ## Structured Sessions
 
-Use `PingConfig` when callers already have typed protocol and duration values:
+Use `PingConfig` when callers already have a resolved socket address, typed
+protocol, and duration values:
 
 ```rust
 use rup::{PingConfig, Protocol, run_ping_session};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut config = PingConfig::new("127.0.0.1:5000".to_string(), Protocol::Udp);
+    let mut config = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp);
     config.ping_number = Some(5);
     config.tos = Some(184);
 
@@ -77,13 +78,19 @@ use rup::{PingConfig, PingEvent, Protocol, start_ping_session};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut config = PingConfig::new("127.0.0.1:5000".to_string(), Protocol::Udp);
+    let mut config = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp);
     config.ping_number = Some(5);
 
     let mut session = start_ping_session(config).await?;
     while let Some(event) = session.next().await {
         match event {
-            PingEvent::Reply(result) => println!("seq={} rtt={:?}", result.seq, result.rtt),
+            PingEvent::Reply(result) => println!(
+                "seq={} size={} ttl={:?} rtt={:?}",
+                result.seq,
+                result.size,
+                result.ttl,
+                result.rtt,
+            ),
             PingEvent::Timeout { seq } => println!("seq={seq} timed out"),
             PingEvent::ReorderOrLoss { seq } => println!("seq={seq} lost or reordered"),
         }

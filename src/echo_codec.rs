@@ -40,6 +40,8 @@ pub fn decode_response(buf: &[u8]) -> io::Result<Response> {
     Ok(Response {
         id: echo.id,
         timestamp: Instant::now(),
+        size: buf.len(),
+        ttl: None,
     })
 }
 

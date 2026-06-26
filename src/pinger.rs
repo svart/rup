@@ -14,6 +14,8 @@ pub struct Request {
 pub struct Response {
     pub id: u64,
     pub timestamp: Instant,
+    pub size: usize,
+    pub ttl: Option<u8>,
 }
 
 pub struct Entry {
@@ -23,7 +25,7 @@ pub struct Entry {
 
 pub enum StatEntry {
     Open(Entry),
-    Close(Entry),
+    Close(Response),
 }
 
 pub enum SendMode {

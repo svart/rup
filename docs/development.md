@@ -11,7 +11,7 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 | `src/protocol.rs` | `Protocol` enum, parsing, display names, CLI value list |
 | `src/echo_codec.rs` | Shared UDP/TCP echo payload encoding and decoding |
 | `src/pinger.rs` | Request/response domain types, `Echo`, `SendMode`, request generator |
-| `src/statistics.rs` | RTT matching, timeout handling, live presenter, shared statistics helpers |
+| `src/statistics.rs` | RTT matching, timeout handling, live event emission, shared statistics helpers |
 | `src/transport/mod.rs` | `Transport` trait plus transmitter/receiver adapters |
 | `src/transport/async_udp.rs` | UDP client transport and UDP echo server |
 | `src/transport/async_tcp.rs` | TCP client transport and TCP echo server |

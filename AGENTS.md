@@ -19,7 +19,7 @@ The project is a single crate with two targets:
 | `src/main.rs` | bin | Entry point, task wiring, DNS resolution, protocol dispatch |
 | `src/cli.rs` | bin | CLAP argument definitions and parsing |
 | `src/pinger.rs` | lib | Domain types (`Request`, `Response`, `Entry`, `StatEntry`, `Echo`, `SendMode`) + `generator` task |
-| `src/statistics.rs` | lib | `statista`/`statista_with_collector`, timeout watchers, `RttSequence` stats |
+| `src/statistics.rs` | lib | `statista`/`statista_with_collector`, live event emission, timeout handling, `RttSequence` stats |
 | `src/transport/mod.rs` | lib | `Transport` trait + `transmitter()`/`receiver()` adapter functions |
 | `src/transport/async_udp.rs` | lib | `UdpClientTransport` + UDP echo server |
 | `src/transport/async_tcp.rs` | lib | `TcpClientTransport` + TCP echo server |
@@ -59,6 +59,7 @@ All core types are publicly accessible:
 - `rup::statista()` / `rup::statista_with_collector()` — RTT matching
 - `rup::Request`, `rup::Response`, `rup::Entry`, `rup::StatEntry`, `rup::SendMode`
 - `rup::Echo`, `rup::PING_HDR_LEN` — wire protocol types
+- `rup::PingSession`, `rup::PingEvent` — consume live ping results with `next().await`
 - `rup::RttSequence` — compute min/med/avg/std_dev statistics
 - `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
 - `rup::PingResult` — individual RTT measurement `{seq: u64, rtt: Duration}`
@@ -67,7 +68,7 @@ All core types are publicly accessible:
 ## Architecture
 
 ```
-generator ──Request──> transmitter ──StatEntry::Open──> statista ──PingRTT──> presenter
+generator ──Request──> transmitter ──StatEntry::Open──> statista ──PingEvent──> caller
                           │                                    ^
                     send()│                              recv()│
                           │                                    │
@@ -86,9 +87,10 @@ generator ──Request──> transmitter ──StatEntry::Open──> statista
 2. **Transmitter** takes each `Request`, calls `Transport::send()`, records the
    send timestamp, and sends `StatEntry::Open` to statista.
 3. **Receiver** calls `Transport::recv()`, and sends `StatEntry::Close` to statista.
-4. **Statista** matches Open/Close entries by ID, computes RTT, forwards `PingRTT`
-   to presenter. Spawns timeout watchers for each Open entry.
-5. **Presenter** prints live RTT lines and final min/med/avg/std_dev/max statistics
+4. **Statista** matches Open/Close entries by ID, computes RTT, and emits
+   structured `PingEvent` values for live sessions.
+5. **Caller/CLI** consumes `PingSession::next()` events and prints or processes
+   live RTT lines, losses, timeouts, and final statistics
    with packet loss percentage.
 
 ### Transport trait
@@ -189,8 +191,7 @@ cargo run --release -- -p tcp 127.0.0.1:5000
 
 ## Known issues / TODOs
 
-- `statista` exits immediately when receiver is aborted — timeout watchers may
-  fire after presenter has already printed final stats (cosmetic, unused entries
-  are silently dropped)
+- `statista` exits immediately when receiver is aborted — pending timeout events
+  may be skipped after the transport tasks have already ended
 - No jitter/mean deviation in statistics (only std_dev)
 - `Response.size` field was removed; packet size statistics not tracked

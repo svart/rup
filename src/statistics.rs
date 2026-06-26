@@ -5,29 +5,11 @@ use std::{cmp::Ordering, collections::VecDeque};
 
 #[cfg(test)]
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::sleep;
 
-use crate::PingResult;
 use crate::pinger::{Entry, StatEntry};
-
-#[derive(Debug)]
-struct PingRTT {
-    index: u64,
-    rtt: Duration,
-}
-
-fn fmt_duration(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs >= 1.0 {
-        format!("{secs:.3} s")
-    } else if secs >= 0.001 {
-        format!("{:.3} ms", secs * 1000.0)
-    } else {
-        format!("{:.3} µs", secs * 1_000_000.0)
-    }
-}
+use crate::{PingEvent, PingResult};
 
 pub(crate) fn loss_pct(sent: u64, received: u64) -> f64 {
     if sent > 0 {
@@ -79,7 +61,6 @@ async fn receive_timeout(
     while let Some(req) = requests.front() {
         if req.id <= index {
             requests.pop_front();
-            println!("seq={index} timeout");
 
             if let Some(gen_channel) = &to_generator {
                 let _ = gen_channel.send(()).await;
@@ -92,12 +73,8 @@ async fn receive_timeout(
 
 enum StatSink {
     None,
-    Presenter(Sender<PingRTT>),
+    Events(Sender<PingEvent>),
     Collector(Sender<PingResult>),
-    Both {
-        presenter: Sender<PingRTT>,
-        collector: Sender<PingResult>,
-    },
 }
 
 async fn signal_generator(to_generator: &Option<Sender<()>>) {
@@ -106,19 +83,23 @@ async fn signal_generator(to_generator: &Option<Sender<()>>) {
     }
 }
 
-async fn emit_ping(sink: &StatSink, index: u64, rtt: Duration) -> bool {
+async fn emit_reply(sink: &StatSink, seq: u64, rtt: Duration) {
+    let result = PingResult { seq, rtt };
+
     match sink {
-        StatSink::None => true,
-        StatSink::Presenter(sender) => sender.send(PingRTT { index, rtt }).await.is_ok(),
-        StatSink::Collector(sender) => sender.send(PingResult { seq: index, rtt }).await.is_ok(),
-        StatSink::Both {
-            presenter,
-            collector,
-        } => {
-            let presenter_ok = presenter.send(PingRTT { index, rtt }).await.is_ok();
-            let collector_ok = collector.send(PingResult { seq: index, rtt }).await.is_ok();
-            presenter_ok && collector_ok
+        StatSink::None => {}
+        StatSink::Events(sender) => {
+            let _ = sender.send(PingEvent::Reply(result)).await;
         }
+        StatSink::Collector(sender) => {
+            let _ = sender.send(result).await;
+        }
+    }
+}
+
+async fn emit_event(sink: &StatSink, event: PingEvent) {
+    if let StatSink::Events(sender) = sink {
+        let _ = sender.send(event).await;
     }
 }
 
@@ -126,7 +107,7 @@ async fn expire_timed_out(
     requests: &mut VecDeque<Entry>,
     wait_time: Duration,
     to_generator: &Option<Sender<()>>,
-    print_timeouts: bool,
+    sink: &StatSink,
 ) {
     while let Some(req) = requests.front() {
         if req.ts.elapsed() < wait_time {
@@ -134,9 +115,7 @@ async fn expire_timed_out(
         }
 
         let req = requests.pop_front().expect("front checked above");
-        if print_timeouts {
-            println!("seq={} timeout", req.id);
-        }
+        emit_event(sink, PingEvent::Timeout { seq: req.id }).await;
         signal_generator(to_generator).await;
     }
 }
@@ -150,7 +129,6 @@ async fn run_statista_core(
     let mut requests = VecDeque::<Entry>::new();
     let mut rtts = Vec::new();
     let mut total_sent = 0u64;
-    let print_events = matches!(sink, StatSink::Presenter(_) | StatSink::Both { .. });
 
     loop {
         let timeout = requests
@@ -173,23 +151,15 @@ async fn run_statista_core(
                         while let Some(req) = requests.pop_front() {
                             match index.cmp(&req.id) {
                                 Ordering::Greater => {
-                                    if print_events {
-                                        println!("seq={} reorder or loss", req.id);
-                                    }
+                                    emit_event(&sink, PingEvent::ReorderOrLoss { seq: req.id })
+                                        .await;
                                     continue;
                                 }
                                 Ordering::Equal => {
                                     let rtt = t.ts.duration_since(req.ts);
                                     rtts.push(rtt);
                                     signal_generator(&to_generator).await;
-
-                                    if !emit_ping(&sink, index, rtt).await {
-                                        return crate::PingReport {
-                                            sent: total_sent,
-                                            received: rtts.len() as u64,
-                                            rtts,
-                                        };
-                                    }
+                                    emit_reply(&sink, index, rtt).await;
                                 }
                                 Ordering::Less => requests.push_front(req),
                             }
@@ -199,7 +169,7 @@ async fn run_statista_core(
                 }
             }
             _ = sleep(timeout), if !requests.is_empty() => {
-                expire_timed_out(&mut requests, wait_time, &to_generator, print_events).await;
+                expire_timed_out(&mut requests, wait_time, &to_generator, &sink).await;
             }
         }
     }
@@ -216,7 +186,7 @@ pub async fn statista(
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
 ) {
-    let _ = statista_with_presenter(from_transport, to_generator, wait_time).await;
+    let _ = statista_report(from_transport, to_generator, wait_time).await;
 }
 
 pub(crate) async fn statista_report(
@@ -227,26 +197,19 @@ pub(crate) async fn statista_report(
     run_statista_core(from_transport, to_generator, wait_time, StatSink::None).await
 }
 
-pub(crate) async fn statista_with_presenter(
+pub(crate) async fn statista_with_events(
     from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
+    events: Sender<PingEvent>,
 ) -> crate::PingReport {
-    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
-    let (sent_tx, sent_rx) = oneshot::channel();
-
-    tokio::spawn(presenter(stat_pres_recv, sent_rx));
-
-    let report = run_statista_core(
+    run_statista_core(
         from_transport,
         to_generator,
         wait_time,
-        StatSink::Presenter(stat_pres_send),
+        StatSink::Events(events),
     )
-    .await;
-
-    let _ = sent_tx.send(report.sent);
-    report
+    .await
 }
 
 pub async fn statista_with_collector(
@@ -262,45 +225,6 @@ pub async fn statista_with_collector(
         StatSink::Collector(collector),
     )
     .await
-}
-
-pub async fn statista_with_presenter_and_collector(
-    from_transport: Receiver<StatEntry>,
-    to_generator: Option<Sender<()>>,
-    wait_time: Duration,
-    collector: Sender<PingResult>,
-) -> crate::PingReport {
-    let (stat_pres_send, stat_pres_recv): (Sender<PingRTT>, Receiver<PingRTT>) = mpsc::channel(32);
-    let (sent_tx, sent_rx) = oneshot::channel();
-
-    tokio::spawn(presenter(stat_pres_recv, sent_rx));
-
-    let report = run_statista_core(
-        from_transport,
-        to_generator,
-        wait_time,
-        StatSink::Both {
-            presenter: stat_pres_send,
-            collector,
-        },
-    )
-    .await;
-
-    let _ = sent_tx.send(report.sent);
-    report
-}
-
-async fn presenter(mut from_statista: Receiver<PingRTT>, sent_rx: oneshot::Receiver<u64>) {
-    let mut sequence = RttSequence::new();
-
-    while let Some(t) = from_statista.recv().await {
-        println!("seq={} time={}", t.index, fmt_duration(t.rtt));
-        sequence.record(t.rtt);
-    }
-
-    let total_sent = sent_rx.await.unwrap_or(sequence.received);
-    sequence.set_total_sent(total_sent);
-    sequence.print_stats();
 }
 
 pub struct RttSequence {
@@ -340,44 +264,13 @@ impl RttSequence {
     pub fn std_deviation(&self) -> Duration {
         std_deviation(&self.rtts).unwrap_or_default()
     }
-
-    pub fn print_stats(&mut self) {
-        if self.rtts.is_empty() {
-            println!("no statistics collected");
-            return;
-        }
-
-        self.rtts.sort();
-
-        let loss_pct = loss_pct(self.sent, self.received);
-
-        let min = self.rtts[0];
-        let max = self.rtts[self.rtts.len() - 1];
-        let avg = self.mean();
-        let std_dev = self.std_deviation();
-        let median = median(&self.rtts).unwrap_or_default();
-
-        println!(
-            "\n--- statistics ---\n\
-             {sr} requests sent, {rc} received, {loss:.0}% loss\n\
-             min/med/avg/max = {mi} / {me} / {av} / {ma}\n\
-             std_dev = {sd}",
-            sr = self.sent,
-            rc = self.received,
-            loss = loss_pct,
-            mi = fmt_duration(min),
-            me = fmt_duration(median),
-            av = fmt_duration(avg),
-            ma = fmt_duration(max),
-            sd = fmt_duration(std_dev),
-        );
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+    use tokio::sync::mpsc;
 
     #[test]
     fn rtt_sequence_mean() {
@@ -476,12 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn rtt_sequence_empty_stats_no_panic() {
-        let mut seq = RttSequence::new();
-        seq.print_stats();
-    }
-
-    #[test]
     fn rtt_sequence_loss_no_sent() {
         let mut seq = RttSequence::new();
         seq.set_total_sent(0);
@@ -509,47 +396,6 @@ mod tests {
         seq.set_total_sent(5);
         let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
         assert!((loss_pct - 100.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn rtt_sequence_print_stats_happy_path() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(100));
-        seq.record(Duration::from_micros(200));
-        seq.set_total_sent(2);
-        seq.print_stats();
-    }
-
-    #[test]
-    fn fmt_duration_micros() {
-        let s = fmt_duration(Duration::from_micros(50));
-        assert!(s.contains("µs"));
-    }
-
-    #[test]
-    fn fmt_duration_millis() {
-        let s = fmt_duration(Duration::from_millis(5));
-        assert!(s.contains("ms"));
-    }
-
-    #[test]
-    fn fmt_duration_secs() {
-        let s = fmt_duration(Duration::from_secs(2));
-        assert!(s.contains("s"));
-    }
-
-    #[test]
-    fn fmt_duration_exact_boundaries() {
-        assert!(fmt_duration(Duration::from_millis(1)).contains("ms"));
-        assert!(fmt_duration(Duration::from_secs(1)).contains("s"));
-        assert!(fmt_duration(Duration::from_micros(999)).contains("µs"));
-        assert!(fmt_duration(Duration::from_millis(999)).contains("ms"));
-    }
-
-    #[test]
-    fn fmt_duration_zero() {
-        let s = fmt_duration(Duration::from_nanos(0));
-        assert!(s.contains("µs"));
     }
 
     #[test]
@@ -897,5 +743,65 @@ mod tests {
         assert_eq!(report.sent, 1);
         assert_eq!(report.received, 0);
         assert!(result_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn statista_events_report_reply_timeout_and_reorder() {
+        let (stat_tx, stat_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let sent = Instant::now();
+
+        stat_tx
+            .send(StatEntry::Open(Entry { id: 0, ts: sent }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Open(Entry { id: 1, ts: sent }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Close(Entry {
+                id: 1,
+                ts: sent + Duration::from_millis(3),
+            }))
+            .await
+            .unwrap();
+        stat_tx
+            .send(StatEntry::Open(Entry {
+                id: 2,
+                ts: Instant::now(),
+            }))
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(statista_with_events(
+            stat_rx,
+            None,
+            Duration::from_millis(1),
+            event_tx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        drop(stat_tx);
+        let report = handle.await.unwrap();
+
+        assert_eq!(report.sent, 3);
+        assert_eq!(report.received, 1);
+        assert_eq!(
+            event_rx.recv().await.unwrap(),
+            PingEvent::ReorderOrLoss { seq: 0 }
+        );
+        assert_eq!(
+            event_rx.recv().await.unwrap(),
+            PingEvent::Reply(PingResult {
+                seq: 1,
+                rtt: Duration::from_millis(3),
+            })
+        );
+        assert_eq!(
+            event_rx.recv().await.unwrap(),
+            PingEvent::Timeout { seq: 2 }
+        );
+        assert!(event_rx.recv().await.is_none());
     }
 }

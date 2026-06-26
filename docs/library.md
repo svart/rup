@@ -68,8 +68,33 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-`run_ping_session()` returns a quiet `PingReport`. `run_ping_session_with_output()`
-uses the same session logic and prints live CLI-style output.
+`run_ping_session()` returns a quiet `PingReport`.
+
+Use `start_ping_session()` when callers need live results:
+
+```rust
+use rup::{PingConfig, PingEvent, Protocol, start_ping_session};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let mut config = PingConfig::new("127.0.0.1:5000".to_string(), Protocol::Udp);
+    config.ping_number = Some(5);
+
+    let mut session = start_ping_session(config).await?;
+    while let Some(event) = session.next().await {
+        match event {
+            PingEvent::Reply(result) => println!("seq={} rtt={:?}", result.seq, result.rtt),
+            PingEvent::Timeout { seq } => println!("seq={seq} timed out"),
+            PingEvent::ReorderOrLoss { seq } => println!("seq={seq} lost or reordered"),
+        }
+    }
+
+    let report = session.report().await?;
+    println!("received {} replies", report.received);
+
+    Ok(())
+}
+```
 
 `PingConfig::tos` is the full TOS / traffic class byte. UDP servers reflect the
 received byte on echo responses when available from the operating system.
@@ -99,6 +124,7 @@ The library also exposes the pipeline parts used by the CLI:
 - `transmitter()`
 - `receiver()`
 - `statista()` and `statista_with_collector()`
+- `PingSession` and `PingEvent`
 - `Request`, `Response`, `Entry`, `StatEntry`, `SendMode`
 - `Echo`, `PING_HDR_LEN`
 - `RttSequence`

@@ -3,7 +3,7 @@
 The client path is an actor-style Tokio pipeline:
 
 ```text
-generator --Request--> transmitter --StatEntry::Open--> statista --PingResult--> presenter/collector
+generator --Request--> transmitter --StatEntry::Open--> statista --PingEvent--> caller
                          |                                  ^
                    send()|                            recv()|
                          v                                  |
@@ -17,9 +17,9 @@ generator --Request--> transmitter --StatEntry::Open--> statista --PingResult-->
    forwards `StatEntry::Open`.
 3. `receiver` calls `Transport::recv()` and forwards `StatEntry::Close`.
 4. `statista` matches open and close entries by ID, computes RTTs, tracks
-   timeouts, and emits results.
-5. The CLI presenter prints live output. Library sessions collect a
-   `PingReport`.
+   timeouts, and emits structured `PingEvent` values for live sessions.
+5. Callers consume `PingSession::next()` and decide how to present or process
+   events. Completed sessions return a `PingReport`.
 
 Fixed interval mode sleeps between generated requests. Adaptive mode waits for
 `statista` to signal after either a response or timeout.

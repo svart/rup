@@ -156,7 +156,7 @@ fn main() {
                     remote: remote_address,
                     local: params.local_address,
                     protocol: params.protocol,
-                    interval: params.interval,
+                    interval: Duration::from_millis(params.interval),
                     adaptive: params.adaptive,
                     wait_time: Duration::from_millis(params.wait_time),
                     request_size: params.request_size,

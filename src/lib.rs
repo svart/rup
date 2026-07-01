@@ -154,96 +154,63 @@ impl PingSession {
 /// # }
 /// ```
 pub struct Pinger {
-    remote: SocketAddr,
-    local: SocketAddr,
-    protocol: Protocol,
-    interval: u64,
-    adaptive: bool,
-    wait_time: u64,
-    request_size: Option<u16>,
-    response_size: Option<u16>,
-    tos: Option<u8>,
-    ping_number: Option<u64>,
-    run_time: Option<Duration>,
+    config: PingConfig,
 }
 
 impl Pinger {
     pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
         Pinger {
-            remote,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol,
-            interval: 1000,
-            adaptive: false,
-            wait_time: 1000,
-            request_size: None,
-            response_size: None,
-            tos: None,
-            ping_number: None,
-            run_time: None,
+            config: PingConfig::new(remote, protocol),
         }
     }
 
     pub fn count(mut self, n: u64) -> Self {
-        self.ping_number = Some(n);
+        self.config.ping_number = Some(n);
         self
     }
 
     pub fn interval(mut self, ms: u64) -> Self {
-        self.interval = ms;
+        self.config.interval = Duration::from_millis(ms);
         self
     }
 
     pub fn adaptive(mut self) -> Self {
-        self.adaptive = true;
+        self.config.adaptive = true;
         self
     }
 
     pub fn wait_time(mut self, ms: u64) -> Self {
-        self.wait_time = ms;
+        self.config.wait_time = Duration::from_millis(ms);
         self
     }
 
     pub fn request_size(mut self, size: u16) -> Self {
-        self.request_size = Some(size);
+        self.config.request_size = Some(size);
         self
     }
 
     pub fn response_size(mut self, size: u16) -> Self {
-        self.response_size = Some(size);
+        self.config.response_size = Some(size);
         self
     }
 
     pub fn tos(mut self, tos: u8) -> Self {
-        self.tos = Some(tos);
+        self.config.tos = Some(tos);
         self
     }
 
     pub fn local(mut self, addr: SocketAddr) -> Self {
-        self.local = addr;
+        self.config.local = addr;
         self
     }
 
     pub fn run_time(mut self, dur: Duration) -> Self {
-        self.run_time = Some(dur);
+        self.config.run_time = Some(dur);
         self
     }
 
     pub async fn run(self) -> io::Result<PingReport> {
-        run_ping_session(PingConfig {
-            remote: self.remote,
-            local: self.local,
-            protocol: self.protocol,
-            interval: self.interval,
-            adaptive: self.adaptive,
-            wait_time: Duration::from_millis(self.wait_time),
-            request_size: self.request_size,
-            response_size: self.response_size,
-            tos: self.tos,
-            ping_number: self.ping_number,
-            run_time: self.run_time,
-        })
-        .await
+        run_ping_session(self.config).await
     }
 }
 
@@ -252,7 +219,7 @@ pub struct PingConfig {
     pub remote: SocketAddr,
     pub local: SocketAddr,
     pub protocol: Protocol,
-    pub interval: u64,
+    pub interval: Duration,
     pub adaptive: bool,
     pub wait_time: Duration,
     pub request_size: Option<u16>,
@@ -268,7 +235,7 @@ impl PingConfig {
             remote,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol,
-            interval: 1000,
+            interval: Duration::from_millis(1000),
             adaptive: false,
             wait_time: Duration::from_millis(1000),
             request_size: None,
@@ -693,7 +660,7 @@ mod tests {
             remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Udp,
-            interval: 1,
+            interval: Duration::from_millis(1),
             adaptive: false,
             wait_time: Duration::from_millis(100),
             request_size: None,
@@ -726,7 +693,7 @@ mod tests {
             remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Udp,
-            interval: 1,
+            interval: Duration::from_millis(1),
             adaptive: false,
             wait_time: Duration::from_millis(5),
             request_size: None,
@@ -770,7 +737,7 @@ mod tests {
             remote: server_addr,
             local: "0.0.0.0:0".parse().unwrap(),
             protocol: Protocol::Tcp,
-            interval: 1,
+            interval: Duration::from_millis(1),
             adaptive: false,
             wait_time: Duration::from_millis(100),
             request_size: None,
@@ -795,7 +762,7 @@ mod tests {
                 remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
-                interval: 1,
+                interval: Duration::from_millis(1),
                 adaptive: false,
                 wait_time: Duration::from_millis(100),
                 request_size: None,
@@ -825,7 +792,7 @@ mod tests {
                     remote: "127.0.0.1:0".parse().unwrap(),
                     local: "0.0.0.0:0".parse().unwrap(),
                     protocol: Protocol::Udp,
-                    interval: 1000,
+                    interval: Duration::from_millis(1000),
                     adaptive: true,
                     wait_time: Duration::from_millis(100),
                     request_size: None,
@@ -854,7 +821,7 @@ mod tests {
                 remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
-                interval: 1,
+                interval: Duration::from_millis(1),
                 adaptive: false,
                 wait_time: Duration::from_millis(2),
                 request_size: None,
@@ -881,7 +848,7 @@ mod tests {
                 remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
-                interval: 1000,
+                interval: Duration::from_millis(1000),
                 adaptive: true,
                 wait_time: Duration::from_millis(100),
                 request_size: None,
@@ -907,7 +874,7 @@ mod tests {
                 remote: "127.0.0.1:0".parse().unwrap(),
                 local: "0.0.0.0:0".parse().unwrap(),
                 protocol: Protocol::Udp,
-                interval: 1,
+                interval: Duration::from_millis(1),
                 adaptive: false,
                 wait_time: Duration::from_millis(100),
                 request_size: None,

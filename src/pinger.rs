@@ -30,7 +30,7 @@ pub enum StatEntry {
 
 pub enum SendMode {
     Adaptive(mpsc::Receiver<()>),
-    Interval(u64),
+    Interval(Duration),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,7 +94,7 @@ pub async fn generator(
             }
             SendMode::Interval(interval) => {
                 tokio::select! {
-                    _ = sleep(Duration::from_millis(interval)) => {},
+                    _ = sleep(interval) => {},
                     _ = &mut run_time => {
                         return;
                     }
@@ -229,7 +229,7 @@ mod tests {
 
         tokio::spawn(generator(
             tx,
-            SendMode::Interval(1),
+            SendMode::Interval(Duration::from_millis(1)),
             Some(3),
             None,
             None,
@@ -249,7 +249,7 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Interval(1),
+            SendMode::Interval(Duration::from_millis(1)),
             Some(5),
             None,
             None,
@@ -273,7 +273,7 @@ mod tests {
 
         tokio::spawn(generator(
             tx,
-            SendMode::Interval(1),
+            SendMode::Interval(Duration::from_millis(1)),
             Some(1),
             None,
             Some(100),
@@ -317,7 +317,7 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Interval(1000),
+            SendMode::Interval(Duration::from_millis(1000)),
             Some(100),
             None,
             None,
@@ -380,8 +380,8 @@ mod tests {
 
     #[test]
     fn send_mode_interval_creation() {
-        match SendMode::Interval(500) {
-            SendMode::Interval(v) => assert_eq!(v, 500),
+        match SendMode::Interval(Duration::from_millis(500)) {
+            SendMode::Interval(v) => assert_eq!(v, Duration::from_millis(500)),
             _ => panic!("expected Interval"),
         }
     }

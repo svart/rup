@@ -24,6 +24,27 @@ use tokio::task::JoinHandle;
 
 const CHANNEL_CAP: usize = 1024;
 
+struct SessionChannels {
+    generator_to_transmitter: mpsc::Sender<pinger::Request>,
+    transmitter_input: mpsc::Receiver<pinger::Request>,
+    transport_to_statista: mpsc::Sender<pinger::StatEntry>,
+    statista_input: mpsc::Receiver<pinger::StatEntry>,
+}
+
+impl SessionChannels {
+    fn new() -> Self {
+        let (generator_to_transmitter, transmitter_input) = mpsc::channel(CHANNEL_CAP);
+        let (transport_to_statista, statista_input) = mpsc::channel(CHANNEL_CAP);
+
+        Self {
+            generator_to_transmitter,
+            transmitter_input,
+            transport_to_statista,
+            statista_input,
+        }
+    }
+}
+
 pub fn has_port(addr: &str) -> bool {
     if addr.starts_with('[') {
         let after_bracket = addr.split(']').nth(1).unwrap_or("");
@@ -336,8 +357,7 @@ async fn run_ping_with_transport<T>(
 where
     T: Transport + Clone + Send + 'static,
 {
-    let (gen_txtr_send, gen_txtr_recv) = mpsc::channel(CHANNEL_CAP);
-    let (txtr_stat_send, txtr_stat_recv) = mpsc::channel(CHANNEL_CAP);
+    let channels = SessionChannels::new();
 
     let (send_mode, txtr_gen) = if config.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(CHANNEL_CAP);
@@ -346,11 +366,14 @@ where
         (SendMode::Interval(config.interval), None)
     };
 
-    let (mut tx_handle, mut rx_handle) =
-        spawn_pinger_tasks(transport, gen_txtr_recv, txtr_stat_send);
+    let (mut tx_handle, mut rx_handle) = spawn_pinger_tasks(
+        transport,
+        channels.transmitter_input,
+        channels.transport_to_statista,
+    );
 
     let generator = tokio::spawn(pinger::generator(
-        gen_txtr_send,
+        channels.generator_to_transmitter,
         pinger::GeneratorConfig {
             send_mode,
             ping_number: config.ping_number,
@@ -362,14 +385,14 @@ where
 
     let statista = if let Some(events) = events {
         tokio::spawn(statistics::statista_with_events(
-            txtr_stat_recv,
+            channels.statista_input,
             txtr_gen,
             config.wait_time,
             events,
         ))
     } else {
         tokio::spawn(statistics::statista_report(
-            txtr_stat_recv,
+            channels.statista_input,
             txtr_gen,
             config.wait_time,
         ))

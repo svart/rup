@@ -74,7 +74,7 @@ pub fn try_parse_icmp_response(
     Ok(Some(Response {
         id: echo.id,
         timestamp: Instant::now(),
-        size: n,
+        size: n - DATA_OFFSET,
         ttl,
     }))
 }
@@ -439,7 +439,7 @@ mod tests {
         assert!(result.is_some());
         let result = result.unwrap();
         assert_eq!(result.id, 7);
-        assert_eq!(result.size, reply.len());
+        assert_eq!(result.size, PING_HDR_LEN);
         assert_eq!(result.ttl, Some(64));
     }
 

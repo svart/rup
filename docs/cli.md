@@ -86,8 +86,8 @@ rup -p tcp server 0.0.0.0:5000
 
 ```text
 PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
-20 bytes from 127.0.0.1: seq=0 ttl=64 time=0.053 ms
-20 bytes from 127.0.0.1: seq=1 ttl=64 time=0.052 ms
+12 bytes from 127.0.0.1: seq=0 ttl=64 time=0.053 ms
+12 bytes from 127.0.0.1: seq=1 ttl=64 time=0.052 ms
 
 --- 127.0.0.1 ping statistics ---
 2 packets transmitted, 2 received, 0% packet loss, time 1001ms

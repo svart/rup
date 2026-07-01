@@ -9,22 +9,49 @@ mod cli;
 use cli::CliParams::{PingerParams, ServerParams};
 use rup::{PING_HDR_LEN, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
 
+#[derive(Clone, Debug)]
+struct ResolvedTarget {
+    input: String,
+    address: SocketAddr,
+}
+
 struct OutputContext {
-    target: String,
-    remote: SocketAddr,
+    target: ResolvedTarget,
     protocol: Protocol,
     request_size: Option<PacketSize>,
 }
 
-async fn resolve_remote_address(remote: &str, protocol: Protocol) -> io::Result<SocketAddr> {
-    let addr = rup::ensure_port(remote, protocol)?;
+#[derive(Clone, Copy)]
+struct DisplayTiming {
+    interval: Duration,
+    adaptive: bool,
+    ping_number: Option<u64>,
+}
+
+impl From<&cli::PingerParams> for DisplayTiming {
+    fn from(params: &cli::PingerParams) -> Self {
+        Self {
+            interval: params.interval,
+            adaptive: params.adaptive,
+            ping_number: params.ping_number,
+        }
+    }
+}
+
+async fn resolve_remote_target(remote: String, protocol: Protocol) -> io::Result<ResolvedTarget> {
+    let addr = rup::ensure_port(&remote, protocol)?;
     let mut addrs = tokio::net::lookup_host(&addr)
         .await
         .map_err(|e| io::Error::other(format!("failed to resolve '{remote}': {e}")))?;
 
-    addrs
+    let address = addrs
         .next()
-        .ok_or_else(|| io::Error::other(format!("no addresses found for {remote}")))
+        .ok_or_else(|| io::Error::other(format!("no addresses found for {remote}")))?;
+
+    Ok(ResolvedTarget {
+        input: remote,
+        address,
+    })
 }
 
 fn fmt_duration_ms(d: Duration) -> String {
@@ -42,7 +69,7 @@ fn data_size(ctx: &OutputContext) -> usize {
 }
 
 fn total_packet_size(ctx: &OutputContext) -> usize {
-    let ip_header = if ctx.remote.is_ipv4() { 20 } else { 40 };
+    let ip_header = if ctx.target.address.is_ipv4() { 20 } else { 40 };
     let protocol_header = match ctx.protocol {
         Protocol::Icmp | Protocol::Udp => 8,
         Protocol::Tcp => 20,
@@ -53,8 +80,8 @@ fn total_packet_size(ctx: &OutputContext) -> usize {
 fn header_line(ctx: &OutputContext) -> String {
     format!(
         "PING {} ({}) {}({}) bytes of data.",
-        ctx.target,
-        ctx.remote.ip(),
+        ctx.target.input,
+        ctx.target.address.ip(),
         data_size(ctx),
         total_packet_size(ctx)
     )
@@ -68,7 +95,7 @@ fn reply_line(ctx: &OutputContext, result: &PingResult) -> String {
     format!(
         "{} bytes from {}: seq={}{} time={}",
         result.size,
-        ctx.remote.ip(),
+        ctx.target.address.ip(),
         result.seq,
         ttl,
         fmt_duration_ms(result.rtt)
@@ -85,15 +112,9 @@ fn packet_loss_line(report: &PingReport, elapsed: Duration) -> String {
     )
 }
 
-fn display_elapsed(
-    elapsed: Duration,
-    report: &PingReport,
-    interval: Duration,
-    adaptive: bool,
-    ping_number: Option<u64>,
-) -> Duration {
-    if !adaptive && report.sent > 0 && ping_number == Some(report.sent) {
-        elapsed.saturating_sub(interval)
+fn display_elapsed(elapsed: Duration, report: &PingReport, timing: DisplayTiming) -> Duration {
+    if !timing.adaptive && report.sent > 0 && timing.ping_number == Some(report.sent) {
+        elapsed.saturating_sub(timing.interval)
     } else {
         elapsed
     }
@@ -110,16 +131,13 @@ fn rtt_line(report: &PingReport) -> Option<String> {
 }
 
 fn print_event(ctx: &OutputContext, event: PingEvent) {
-    match event {
-        PingEvent::Reply(result) => {
-            println!("{}", reply_line(ctx, &result));
-        }
-        PingEvent::Timeout { .. } | PingEvent::ReorderOrLoss { .. } => {}
+    if let PingEvent::Reply(result) = event {
+        println!("{}", reply_line(ctx, &result));
     }
 }
 
 fn print_report(ctx: &OutputContext, report: &PingReport, elapsed: Duration) {
-    println!("\n--- {} ping statistics ---", ctx.target);
+    println!("\n--- {} ping statistics ---", ctx.target.input);
     println!("{}", packet_loss_line(report, elapsed));
     if let Some(line) = rtt_line(report) {
         println!("{line}");
@@ -135,72 +153,69 @@ fn main() {
         .build()
         .expect("failed to build runtime");
 
+    rt.block_on(run_cli(cli_params));
+}
+
+async fn run_cli(cli_params: cli::CliParams) {
     match cli_params {
-        PingerParams(params) => {
-            rt.block_on(async {
-                let remote_address =
-                    match resolve_remote_address(&params.remote_address, params.protocol).await {
-                        Ok(remote_address) => remote_address,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            return;
-                        }
-                    };
+        PingerParams(params) => run_client(params).await,
+        ServerParams(params) => run_server_command(params).await,
+    }
+}
 
-                let ctx = OutputContext {
-                    target: params.remote_address.clone(),
-                    remote: remote_address,
-                    protocol: params.protocol,
-                    request_size: params.request_size,
-                };
+async fn run_server_command(params: cli::ServerParams) {
+    if let Err(e) = rup::run_server(params.protocol, params.local_address).await {
+        eprintln!("{e}");
+    }
+}
 
-                let config = PingConfig {
-                    remote: remote_address,
-                    local: params.local_address,
-                    protocol: params.protocol,
-                    interval: params.interval,
-                    adaptive: params.adaptive,
-                    wait_time: params.wait_time,
-                    request_size: params.request_size,
-                    response_size: params.response_size,
-                    tos: params.tos,
-                    ping_number: params.ping_number,
-                    run_time: params.run_time,
-                };
-
-                println!("{}", header_line(&ctx));
-                let started = Instant::now();
-                match rup::start_ping_session(config).await {
-                    Ok(mut session) => {
-                        while let Some(event) = session.next().await {
-                            print_event(&ctx, event);
-                        }
-
-                        match session.report().await {
-                            Ok(report) => {
-                                let elapsed = display_elapsed(
-                                    started.elapsed(),
-                                    &report,
-                                    params.interval,
-                                    params.adaptive,
-                                    params.ping_number,
-                                );
-                                print_report(&ctx, &report, elapsed);
-                            }
-                            Err(e) => eprintln!("{e}"),
-                        }
-                    }
-                    Err(e) => eprintln!("{e}"),
-                }
-            });
+async fn run_client(params: cli::PingerParams) {
+    let target = match resolve_remote_target(params.remote_address.clone(), params.protocol).await {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
         }
-        ServerParams(params) => {
-            rt.block_on(async {
-                if let Err(e) = rup::run_server(params.protocol, params.local_address).await {
-                    eprintln!("{e}");
+    };
+
+    let ctx = OutputContext {
+        target: target.clone(),
+        protocol: params.protocol,
+        request_size: params.request_size,
+    };
+
+    let config = PingConfig {
+        remote: target.address,
+        local: params.local_address,
+        protocol: params.protocol,
+        interval: params.interval,
+        adaptive: params.adaptive,
+        wait_time: params.wait_time,
+        request_size: params.request_size,
+        response_size: params.response_size,
+        tos: params.tos,
+        ping_number: params.ping_number,
+        run_time: params.run_time,
+    };
+
+    println!("{}", header_line(&ctx));
+    let started = Instant::now();
+    match rup::start_ping_session(config).await {
+        Ok(mut session) => {
+            while let Some(event) = session.next().await {
+                print_event(&ctx, event);
+            }
+
+            match session.report().await {
+                Ok(report) => {
+                    let elapsed =
+                        display_elapsed(started.elapsed(), &report, DisplayTiming::from(&params));
+                    print_report(&ctx, &report, elapsed);
                 }
-            });
+                Err(e) => eprintln!("{e}"),
+            }
         }
+        Err(e) => eprintln!("{e}"),
     }
 }
 
@@ -211,8 +226,10 @@ mod tests {
     #[test]
     fn header_line_matches_ping_shape() {
         let ctx = OutputContext {
-            target: "127.0.0.1".to_string(),
-            remote: "127.0.0.1:0".parse().unwrap(),
+            target: ResolvedTarget {
+                input: "127.0.0.1".to_string(),
+                address: "127.0.0.1:0".parse().unwrap(),
+            },
             protocol: Protocol::Icmp,
             request_size: Some(PacketSize::new(56).unwrap()),
         };
@@ -226,8 +243,10 @@ mod tests {
     #[test]
     fn reply_line_uses_seq_and_optional_ttl() {
         let ctx = OutputContext {
-            target: "127.0.0.1".to_string(),
-            remote: "127.0.0.1:0".parse().unwrap(),
+            target: ResolvedTarget {
+                input: "127.0.0.1".to_string(),
+                address: "127.0.0.1:0".parse().unwrap(),
+            },
             protocol: Protocol::Icmp,
             request_size: None,
         };
@@ -274,9 +293,11 @@ mod tests {
             display_elapsed(
                 Duration::from_millis(2004),
                 &report,
-                Duration::from_millis(1000),
-                false,
-                Some(2)
+                DisplayTiming {
+                    interval: Duration::from_millis(1000),
+                    adaptive: false,
+                    ping_number: Some(2),
+                }
             ),
             Duration::from_millis(1004)
         );
@@ -284,9 +305,11 @@ mod tests {
             display_elapsed(
                 Duration::from_millis(2004),
                 &report,
-                Duration::from_millis(1000),
-                true,
-                Some(2)
+                DisplayTiming {
+                    interval: Duration::from_millis(1000),
+                    adaptive: true,
+                    ping_number: Some(2),
+                }
             ),
             Duration::from_millis(2004)
         );
@@ -294,16 +317,17 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_remote_address_adds_zero_port_for_icmp() {
-        let addr = resolve_remote_address("127.0.0.1", Protocol::Icmp)
+        let target = resolve_remote_target("127.0.0.1".to_string(), Protocol::Icmp)
             .await
             .unwrap();
 
-        assert_eq!(addr, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(target.address, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(target.input, "127.0.0.1");
     }
 
     #[tokio::test]
     async fn resolve_remote_address_rejects_udp_without_port() {
-        let err = resolve_remote_address("127.0.0.1", Protocol::Udp)
+        let err = resolve_remote_target("127.0.0.1".to_string(), Protocol::Udp)
             .await
             .unwrap_err();
 

@@ -5,7 +5,9 @@ pub mod statistics;
 mod tos;
 pub mod transport;
 
-pub use pinger::{Echo, Entry, PING_HDR_LEN, Request, Response, SendMode, StatEntry, generator};
+pub use pinger::{
+    Echo, Entry, GeneratorConfig, PING_HDR_LEN, Request, Response, SendMode, StatEntry, generator,
+};
 pub use protocol::Protocol;
 pub use statistics::{RttSequence, statista, statista_with_collector};
 pub use transport::async_icmp::IcmpClientTransport;
@@ -344,11 +346,13 @@ where
 
     let generator = tokio::spawn(pinger::generator(
         gen_txtr_send,
-        send_mode,
-        config.ping_number,
-        config.run_time,
-        config.request_size,
-        config.response_size,
+        pinger::GeneratorConfig {
+            send_mode,
+            ping_number: config.ping_number,
+            run_time: config.run_time,
+            request_size: config.request_size,
+            response_size: config.response_size,
+        },
     ));
 
     let statista = if let Some(events) = events {

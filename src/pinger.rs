@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::{Instant as TokioInstant, sleep, sleep_until};
 
 #[derive(Clone, Debug)]
 pub struct Request {
@@ -33,6 +33,26 @@ pub enum SendMode {
     Interval(Duration),
 }
 
+pub struct GeneratorConfig {
+    pub send_mode: SendMode,
+    pub ping_number: Option<u64>,
+    pub run_time: Option<Duration>,
+    pub request_size: Option<u16>,
+    pub response_size: Option<u16>,
+}
+
+impl GeneratorConfig {
+    pub fn new(send_mode: SendMode) -> Self {
+        Self {
+            send_mode,
+            ping_number: None,
+            run_time: None,
+            request_size: None,
+            response_size: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Echo {
     pub id: u64,
@@ -43,23 +63,14 @@ pub struct Echo {
 pub const PING_HDR_LEN: usize =
     std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
 
-pub async fn generator(
-    to_tx_transport: mpsc::Sender<Request>,
-    mut send_mode: SendMode,
-    ping_number: Option<u64>,
-    run_time: Option<Duration>,
-    request_size: Option<u16>,
-    response_size: Option<u16>,
-) {
+pub async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: GeneratorConfig) {
     let mut id: u64 = 0;
-
-    let run_time = run_time
-        .map(|run_tune| sleep(run_tune))
-        .unwrap_or(sleep(Duration::from_secs(u64::MAX)));
-    tokio::pin!(run_time);
+    let stop_at = config
+        .run_time
+        .map(|run_time| TokioInstant::now() + run_time);
 
     loop {
-        if let Some(n) = ping_number
+        if let Some(n) = config.ping_number
             && id >= n
         {
             break;
@@ -67,44 +78,51 @@ pub async fn generator(
 
         let req = Request {
             id,
-            request_size,
-            response_size,
+            request_size: config.request_size,
+            response_size: config.response_size,
         };
 
         if to_tx_transport.send(req).await.is_err() {
             break;
         }
 
-        match send_mode {
-            SendMode::Adaptive(ref mut channel) => {
-                let wait_for_response = channel.recv();
+        if !wait_for_next_request(&mut config.send_mode, stop_at).await {
+            return;
+        }
+        id += 1;
+    }
+}
+
+async fn wait_for_next_request(send_mode: &mut SendMode, stop_at: Option<TokioInstant>) -> bool {
+    match send_mode {
+        SendMode::Adaptive(channel) => {
+            if let Some(stop_at) = stop_at {
                 tokio::select! {
-                    r_val = wait_for_response => {
-                        if r_val.is_none() {
-                            break;
-                        }
-                    }
-                    _ = &mut run_time => {
-                        return;
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        return;
-                    }
+                    signal = channel.recv() => signal.is_some(),
+                    _ = sleep_until(stop_at) => false,
+                    _ = tokio::signal::ctrl_c() => false,
                 }
-            }
-            SendMode::Interval(interval) => {
+            } else {
                 tokio::select! {
-                    _ = sleep(interval) => {},
-                    _ = &mut run_time => {
-                        return;
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        return;
-                    }
+                    signal = channel.recv() => signal.is_some(),
+                    _ = tokio::signal::ctrl_c() => false,
                 }
             }
         }
-        id += 1;
+        SendMode::Interval(interval) => {
+            if let Some(stop_at) = stop_at {
+                tokio::select! {
+                    _ = sleep(*interval) => true,
+                    _ = sleep_until(stop_at) => false,
+                    _ = tokio::signal::ctrl_c() => false,
+                }
+            } else {
+                tokio::select! {
+                    _ = sleep(*interval) => true,
+                    _ = tokio::signal::ctrl_c() => false,
+                }
+            }
+        }
     }
 }
 
@@ -229,11 +247,13 @@ mod tests {
 
         tokio::spawn(generator(
             tx,
-            SendMode::Interval(Duration::from_millis(1)),
-            Some(3),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Interval(Duration::from_millis(1)),
+                ping_number: Some(3),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         let mut ids = Vec::new();
@@ -249,11 +269,13 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Interval(Duration::from_millis(1)),
-            Some(5),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Interval(Duration::from_millis(1)),
+                ping_number: Some(5),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         let mut count = 0;
@@ -273,11 +295,13 @@ mod tests {
 
         tokio::spawn(generator(
             tx,
-            SendMode::Interval(Duration::from_millis(1)),
-            Some(1),
-            None,
-            Some(100),
-            Some(200),
+            GeneratorConfig {
+                send_mode: SendMode::Interval(Duration::from_millis(1)),
+                ping_number: Some(1),
+                run_time: None,
+                request_size: Some(100),
+                response_size: Some(200),
+            },
         ));
 
         let req = rx.recv().await.unwrap();
@@ -292,11 +316,13 @@ mod tests {
 
         tokio::spawn(generator(
             tx,
-            SendMode::Adaptive(signal_rx),
-            Some(3),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Adaptive(signal_rx),
+                ping_number: Some(3),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         let req1 = rx.recv().await.unwrap();
@@ -317,11 +343,13 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Interval(Duration::from_millis(1000)),
-            Some(100),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Interval(Duration::from_millis(1000)),
+                ping_number: Some(100),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         drop(rx);
@@ -339,11 +367,13 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Adaptive(signal_rx),
-            Some(100),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Adaptive(signal_rx),
+                ping_number: Some(100),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         let req = rx.recv().await.unwrap();
@@ -363,11 +393,13 @@ mod tests {
 
         let handle = tokio::spawn(generator(
             tx,
-            SendMode::Adaptive(signal_rx),
-            Some(100),
-            None,
-            None,
-            None,
+            GeneratorConfig {
+                send_mode: SendMode::Adaptive(signal_rx),
+                ping_number: Some(100),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
         ));
 
         drop(rx);

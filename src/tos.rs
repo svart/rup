@@ -7,11 +7,7 @@ use tokio::net::{TcpSocket, UdpSocket};
 use crate::TrafficClass;
 
 pub fn set_socket_tos(socket: &Socket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
-    if addr.is_ipv4() {
-        socket.set_tos_v4(tos.as_u8() as u32)
-    } else {
-        socket.set_tclass_v6(tos.as_u8() as u32)
-    }
+    set_sockref_tos(SockRef::from(socket), addr, tos)
 }
 
 pub fn enable_socket_recv_tos(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
@@ -23,16 +19,14 @@ pub fn enable_socket_recv_tos(socket: &Socket, addr: SocketAddr) -> io::Result<(
 }
 
 pub fn set_udp_tos(socket: &UdpSocket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
-    let socket = SockRef::from(socket);
-    if addr.is_ipv4() {
-        socket.set_tos_v4(tos.as_u8() as u32)
-    } else {
-        socket.set_tclass_v6(tos.as_u8() as u32)
-    }
+    set_sockref_tos(SockRef::from(socket), addr, tos)
 }
 
 pub fn set_tcp_tos(socket: &TcpSocket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
-    let socket = SockRef::from(socket);
+    set_sockref_tos(SockRef::from(socket), addr, tos)
+}
+
+fn set_sockref_tos(socket: SockRef<'_>, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
     if addr.is_ipv4() {
         socket.set_tos_v4(tos.as_u8() as u32)
     } else {

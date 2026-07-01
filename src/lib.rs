@@ -83,6 +83,19 @@ pub struct PingReport {
     pub received: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrafficClass(u8);
+
+impl TrafficClass {
+    pub const fn new(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+
 impl PingReport {
     pub fn loss_pct(&self) -> f64 {
         statistics::loss_pct(self.sent, self.received)
@@ -197,7 +210,7 @@ impl Pinger {
     }
 
     pub fn tos(mut self, tos: u8) -> Self {
-        self.config.tos = Some(tos);
+        self.config.tos = Some(TrafficClass::new(tos));
         self
     }
 
@@ -226,7 +239,7 @@ pub struct PingConfig {
     pub wait_time: Duration,
     pub request_size: Option<u16>,
     pub response_size: Option<u16>,
-    pub tos: Option<u8>,
+    pub tos: Option<TrafficClass>,
     pub ping_number: Option<u64>,
     pub run_time: Option<Duration>,
 }

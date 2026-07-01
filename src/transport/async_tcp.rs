@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use crate::TrafficClass;
 use crate::echo_codec;
 use crate::pinger::{PING_HDR_LEN, Request, Response};
 use crate::tos as traffic;
@@ -127,7 +128,7 @@ impl TcpClientTransport {
     pub async fn connect(
         local: SocketAddr,
         remote: SocketAddr,
-        tos: Option<u8>,
+        tos: Option<TrafficClass>,
     ) -> io::Result<Self> {
         let sock = if remote.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?

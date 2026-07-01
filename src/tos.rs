@@ -4,11 +4,13 @@ use std::net::SocketAddr;
 use socket2::{SockRef, Socket};
 use tokio::net::{TcpSocket, UdpSocket};
 
-pub fn set_socket_tos(socket: &Socket, addr: SocketAddr, tos: u8) -> io::Result<()> {
+use crate::TrafficClass;
+
+pub fn set_socket_tos(socket: &Socket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
     if addr.is_ipv4() {
-        socket.set_tos_v4(tos as u32)
+        socket.set_tos_v4(tos.as_u8() as u32)
     } else {
-        socket.set_tclass_v6(tos as u32)
+        socket.set_tclass_v6(tos.as_u8() as u32)
     }
 }
 
@@ -20,21 +22,21 @@ pub fn enable_socket_recv_tos(socket: &Socket, addr: SocketAddr) -> io::Result<(
     }
 }
 
-pub fn set_udp_tos(socket: &UdpSocket, addr: SocketAddr, tos: u8) -> io::Result<()> {
+pub fn set_udp_tos(socket: &UdpSocket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
     let socket = SockRef::from(socket);
     if addr.is_ipv4() {
-        socket.set_tos_v4(tos as u32)
+        socket.set_tos_v4(tos.as_u8() as u32)
     } else {
-        socket.set_tclass_v6(tos as u32)
+        socket.set_tclass_v6(tos.as_u8() as u32)
     }
 }
 
-pub fn set_tcp_tos(socket: &TcpSocket, addr: SocketAddr, tos: u8) -> io::Result<()> {
+pub fn set_tcp_tos(socket: &TcpSocket, addr: SocketAddr, tos: TrafficClass) -> io::Result<()> {
     let socket = SockRef::from(socket);
     if addr.is_ipv4() {
-        socket.set_tos_v4(tos as u32)
+        socket.set_tos_v4(tos.as_u8() as u32)
     } else {
-        socket.set_tclass_v6(tos as u32)
+        socket.set_tclass_v6(tos.as_u8() as u32)
     }
 }
 
@@ -42,7 +44,7 @@ pub fn set_tcp_tos(socket: &TcpSocket, addr: SocketAddr, tos: u8) -> io::Result<
 pub async fn recv_from_with_tos(
     socket: &UdpSocket,
     buf: &mut [u8],
-) -> io::Result<(usize, SocketAddr, Option<u8>)> {
+) -> io::Result<(usize, SocketAddr, Option<TrafficClass>)> {
     use std::mem;
     use std::os::fd::AsRawFd;
 
@@ -87,7 +89,7 @@ pub async fn recv_from_with_tos(
 pub async fn recv_from_with_tos(
     socket: &UdpSocket,
     buf: &mut [u8],
-) -> io::Result<(usize, SocketAddr, Option<u8>)> {
+) -> io::Result<(usize, SocketAddr, Option<TrafficClass>)> {
     let (n, addr) = socket.recv_from(buf).await?;
     Ok((n, addr, None))
 }
@@ -125,7 +127,7 @@ fn socket_addr_from_storage(
 }
 
 #[cfg(unix)]
-unsafe fn parse_tos_cmsg(msg: &libc::msghdr) -> Option<u8> {
+unsafe fn parse_tos_cmsg(msg: &libc::msghdr) -> Option<TrafficClass> {
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg.is_null() {
         let level = unsafe { (*cmsg).cmsg_level };
@@ -137,10 +139,10 @@ unsafe fn parse_tos_cmsg(msg: &libc::msghdr) -> Option<u8> {
             let data_len = unsafe { (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize };
             if data_len >= std::mem::size_of::<libc::c_int>() {
                 let value = unsafe { std::ptr::read_unaligned(data.cast::<libc::c_int>()) };
-                return Some(value as u8);
+                return Some(TrafficClass::new(value as u8));
             }
             if data_len >= 1 {
-                return Some(unsafe { *data });
+                return Some(TrafficClass::new(unsafe { *data }));
             }
         }
         cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };

@@ -2,8 +2,8 @@ use clap::{Arg, ArgAction, Command};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use rup::Protocol;
 use rup::pinger::PING_HDR_LEN;
+use rup::{Protocol, TrafficClass};
 
 fn cli() -> Command {
     Command::new("rup")
@@ -147,7 +147,7 @@ pub(crate) struct PingerParams {
     pub wait_time: u64,
     pub request_size: Option<u16>,
     pub response_size: Option<u16>,
-    pub tos: Option<u8>,
+    pub tos: Option<TrafficClass>,
     pub ping_number: Option<u64>,
     pub protocol: Protocol,
     pub run_time: Option<Duration>,
@@ -187,7 +187,7 @@ where
             wait_time: *matches.get_one::<u64>("wait-time").unwrap(),
             request_size: matches.get_one::<u16>("req-size").copied(),
             response_size: matches.get_one::<u16>("resp-size").copied(),
-            tos: matches.get_one::<u8>("tos").copied(),
+            tos: matches.get_one::<u8>("tos").copied().map(TrafficClass::new),
             ping_number: matches.get_one::<u64>("ping-number").copied(),
             protocol: protocol_or_default(&matches, Protocol::Icmp),
             run_time: matches

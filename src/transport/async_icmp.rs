@@ -6,6 +6,7 @@ use std::time::Instant;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
+use crate::TrafficClass;
 use crate::echo_codec;
 use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::tos as traffic;
@@ -93,7 +94,7 @@ impl IcmpClientTransport {
     pub async fn new_with_tos(
         local: SocketAddr,
         remote: SocketAddr,
-        tos: Option<u8>,
+        tos: Option<TrafficClass>,
     ) -> io::Result<Self> {
         let (domain, protocol) = if is_ipv6(&remote) {
             (Domain::IPV6, Protocol::ICMPV6)
@@ -117,7 +118,7 @@ impl IcmpClientTransport {
             traffic::set_socket_tos(&sock, remote, tos_value).map_err(|e| {
                 io::Error::new(
                     e.kind(),
-                    format!("set TOS {tos_value} for {remote} failed: {e}"),
+                    format!("set TOS {} for {remote} failed: {e}", tos_value.as_u8()),
                 )
             })?;
         }

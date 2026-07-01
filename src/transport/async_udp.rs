@@ -73,13 +73,7 @@ pub async fn server_transport_until(
             }
         };
 
-        let send_buf = match echo_codec::encode_response(req) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("server: failed to serialize response: {e}");
-                continue;
-            }
-        };
+        let send_buf = echo_codec::encode_response(req);
 
         if let Some(tos_value) = packet_tos
             && let Err(e) = traffic::set_udp_tos(&sock, addr, tos_value)
@@ -161,7 +155,7 @@ impl UdpClientTransport {
 
 impl Transport for UdpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let send_buf = echo_codec::encode_request(req)?;
+        let send_buf = echo_codec::encode_request(req);
         let timestamp = Instant::now();
         self.socket.send(&send_buf).await?;
         Ok(timestamp)
@@ -187,7 +181,7 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let buf = echo_codec::encode_request(&req).unwrap();
+        let buf = echo_codec::encode_request(&req);
         assert_eq!(buf.len(), PING_HDR_LEN);
         let echo = echo_codec::decode_header(&buf).unwrap();
         assert_eq!(echo.id, 10);
@@ -201,7 +195,7 @@ mod tests {
             request_size: Some(PacketSize::new(100).unwrap()),
             response_size: None,
         };
-        let buf = echo_codec::encode_request(&req).unwrap();
+        let buf = echo_codec::encode_request(&req);
         assert_eq!(buf.len(), 100);
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 42);
@@ -215,7 +209,7 @@ mod tests {
             request_size: Some(PacketSize::new(50).unwrap()),
             response_size: Some(PacketSize::new(128).unwrap()),
         };
-        let buf = echo_codec::encode_request(&req).unwrap();
+        let buf = echo_codec::encode_request(&req);
         assert_eq!(buf.len(), 50);
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 7);
@@ -230,7 +224,7 @@ mod tests {
             request_size: Some(PacketSize::new(12).unwrap()),
             response_size: None,
         };
-        let buf = echo_codec::encode_request(&req).unwrap();
+        let buf = echo_codec::encode_request(&req);
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0);
     }
@@ -242,7 +236,7 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let buf = echo_codec::encode_request(&req).unwrap();
+        let buf = echo_codec::encode_request(&req);
         let resp = echo_codec::decode_response(&buf).unwrap();
         assert_eq!(resp.id, 99);
     }
@@ -391,7 +385,7 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let packet = echo_codec::encode_request(&req)?;
+        let packet = echo_codec::encode_request(&req);
         client_sock.send_to(&packet, server_addr).await?;
 
         let mut buf = [0u8; 64];

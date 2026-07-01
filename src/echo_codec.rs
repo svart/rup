@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::pinger::{Echo, PING_HDR_LEN, PacketSize, Request, Response};
 
-pub fn encode_request(req: &Request) -> io::Result<Vec<u8>> {
+pub fn encode_request(req: &Request) -> Vec<u8> {
     let echo = Echo {
         id: req.id,
         len: req
@@ -13,7 +13,7 @@ pub fn encode_request(req: &Request) -> io::Result<Vec<u8>> {
         resp_size: req.response_size.map(PacketSize::get).unwrap_or(0),
     };
 
-    Ok(encode_echo(&echo, echo.len as usize))
+    encode_echo(&echo, echo.len as usize)
 }
 
 pub fn decode_header(buf: &[u8]) -> io::Result<Echo> {
@@ -48,12 +48,12 @@ pub fn decode_response(buf: &[u8]) -> io::Result<Response> {
     })
 }
 
-pub fn encode_response(mut echo: Echo) -> io::Result<Vec<u8>> {
+pub fn encode_response(mut echo: Echo) -> Vec<u8> {
     if echo.resp_size > 0 {
         echo.len = echo.resp_size;
     }
     echo.resp_size = 0;
-    Ok(encode_echo(&echo, echo.len as usize))
+    encode_echo(&echo, echo.len as usize)
 }
 
 pub fn encode_echo(echo: &Echo, len: usize) -> Vec<u8> {

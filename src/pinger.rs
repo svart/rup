@@ -143,7 +143,7 @@ mod tests {
             len: 100,
             resp_size: 64,
         };
-        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN);
         let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, 42);
         assert_eq!(decoded.len, 100);
@@ -158,7 +158,7 @@ mod tests {
             len: 0,
             resp_size: 0,
         };
-        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN);
         assert_eq!(bytes.len(), PING_HDR_LEN);
         let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, 0);
@@ -173,7 +173,7 @@ mod tests {
             len: u16::MAX,
             resp_size: u16::MAX,
         };
-        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN);
         assert_eq!(bytes.len(), PING_HDR_LEN);
         let decoded = echo_codec::decode_header(&bytes).unwrap();
         assert_eq!(decoded.id, u64::MAX);
@@ -188,7 +188,7 @@ mod tests {
             len: 2,
             resp_size: 3,
         };
-        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN).unwrap();
+        let bytes = echo_codec::encode_echo(&echo, PING_HDR_LEN);
         assert_eq!(bytes[0..8], 1u64.to_le_bytes());
         assert_eq!(bytes[8..10], 2u16.to_le_bytes());
         assert_eq!(bytes[10..12], 3u16.to_le_bytes());

@@ -39,7 +39,7 @@ pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
         seq_bytes[1],
     ];
 
-    let payload = echo_codec::encode_echo(&r, PING_HDR_LEN)?;
+    let payload = echo_codec::encode_echo(&r, PING_HDR_LEN);
 
     let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
     packet.extend_from_slice(&payload);

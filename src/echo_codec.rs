@@ -10,7 +10,7 @@ pub fn encode_request(req: &Request) -> io::Result<Vec<u8>> {
         resp_size: req.response_size.unwrap_or(0),
     };
 
-    encode_echo(&echo, echo.len as usize)
+    Ok(encode_echo(&echo, echo.len as usize))
 }
 
 pub fn decode_header(buf: &[u8]) -> io::Result<Echo> {
@@ -50,14 +50,14 @@ pub fn encode_response(mut echo: Echo) -> io::Result<Vec<u8>> {
         echo.len = echo.resp_size;
     }
     echo.resp_size = 0;
-    encode_echo(&echo, echo.len as usize)
+    Ok(encode_echo(&echo, echo.len as usize))
 }
 
-pub fn encode_echo(echo: &Echo, len: usize) -> io::Result<Vec<u8>> {
+pub fn encode_echo(echo: &Echo, len: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(len.max(PING_HDR_LEN));
     buf.extend_from_slice(&echo.id.to_le_bytes());
     buf.extend_from_slice(&echo.len.to_le_bytes());
     buf.extend_from_slice(&echo.resp_size.to_le_bytes());
     buf.resize(len, 0);
-    Ok(buf)
+    buf
 }

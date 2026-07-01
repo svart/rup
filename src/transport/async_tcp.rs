@@ -11,6 +11,7 @@ use tokio::time::timeout;
 
 use crate::echo_codec;
 use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
+use crate::tos as traffic;
 use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -135,6 +136,24 @@ impl TcpClientTransport {
         TcpClientTransport {
             stream: Arc::new(stream),
         }
+    }
+
+    pub async fn connect(
+        local: SocketAddr,
+        remote: SocketAddr,
+        tos: Option<u8>,
+    ) -> io::Result<Self> {
+        let sock = if remote.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+        sock.bind(local)?;
+        if let Some(tos_value) = tos {
+            traffic::set_tcp_tos(&sock, remote, tos_value)?;
+        }
+        let stream = sock.connect(remote).await?;
+        Ok(Self::new(stream))
     }
 }
 

@@ -279,17 +279,8 @@ async fn spawn_ping_session(
             Ok(spawn_ping_with_transport(transport, config, events))
         }
         Protocol::Tcp => {
-            let sock = if remote_addr.is_ipv4() {
-                tokio::net::TcpSocket::new_v4()?
-            } else {
-                tokio::net::TcpSocket::new_v6()?
-            };
-            sock.bind(config.local)?;
-            if let Some(tos_value) = config.tos {
-                tos::set_tcp_tos(&sock, remote_addr, tos_value)?;
-            }
-            let stream = sock.connect(remote_addr).await?;
-            let transport = TcpClientTransport::new(stream);
+            let transport =
+                TcpClientTransport::connect(config.local, remote_addr, config.tos).await?;
             Ok(spawn_ping_with_transport(transport, config, events))
         }
         Protocol::Icmp => {

@@ -14,12 +14,46 @@ use crate::transport::Transport;
 
 const ICMP_HEADER_LEN: usize = 8;
 const DATA_OFFSET: usize = ICMP_HEADER_LEN;
+const ICMP_CODE_ECHO: u8 = 0;
+const ICMPV4_ECHO_REQUEST: u8 = 8;
+const ICMPV4_ECHO_REPLY: u8 = 0;
+const ICMPV6_ECHO_REQUEST: u8 = 128;
+const ICMPV6_ECHO_REPLY: u8 = 129;
 
-fn is_ipv6(addr: &SocketAddr) -> bool {
-    matches!(addr, SocketAddr::V6(_))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IpVersion {
+    V4,
+    V6,
 }
 
-pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
+impl IpVersion {
+    fn from_addr(addr: SocketAddr) -> Self {
+        if addr.is_ipv4() { Self::V4 } else { Self::V6 }
+    }
+
+    fn echo_request_type(self) -> u8 {
+        match self {
+            Self::V4 => ICMPV4_ECHO_REQUEST,
+            Self::V6 => ICMPV6_ECHO_REQUEST,
+        }
+    }
+
+    fn echo_reply_type(self) -> u8 {
+        match self {
+            Self::V4 => ICMPV4_ECHO_REPLY,
+            Self::V6 => ICMPV6_ECHO_REPLY,
+        }
+    }
+
+    fn socket_domain_and_protocol(self) -> (Domain, Protocol) {
+        match self {
+            Self::V4 => (Domain::IPV4, Protocol::ICMPV4),
+            Self::V6 => (Domain::IPV6, Protocol::ICMPV6),
+        }
+    }
+}
+
+pub fn build_icmp_packet(req: &Request, ip_version: IpVersion) -> io::Result<Vec<u8>> {
     let r = Echo {
         id: req.id,
         len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
@@ -27,11 +61,10 @@ pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
     };
 
     let seq_bytes = (req.id as u16).to_be_bytes();
-    let echo_type: u8 = if is_v6 { 128 } else { 8 };
 
     let mut packet = vec![
-        echo_type,
-        0x00,
+        ip_version.echo_request_type(),
+        ICMP_CODE_ECHO,
         0x00,
         0x00,
         0x00,
@@ -46,7 +79,7 @@ pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
     packet.extend_from_slice(&payload);
     packet.resize(ICMP_HEADER_LEN + data_len, 0);
 
-    if !is_v6 {
+    if ip_version == IpVersion::V4 {
         let checksum = csum16_slice(&packet);
         packet[2] = (checksum >> 8) as u8;
         packet[3] = (checksum & 0xff) as u8;
@@ -56,26 +89,25 @@ pub fn build_icmp_packet(req: &Request, is_v6: bool) -> io::Result<Vec<u8>> {
 }
 
 pub fn try_parse_icmp_response(
-    buf: &[u8],
-    n: usize,
-    reply_type: u8,
+    packet: &[u8],
+    ip_version: IpVersion,
     ttl: Option<u8>,
 ) -> io::Result<Option<Response>> {
-    if n < DATA_OFFSET + PING_HDR_LEN {
+    if packet.len() < DATA_OFFSET + PING_HDR_LEN {
         return Ok(None);
     }
-    if buf[0] != reply_type || buf[1] != 0x00 {
+    if packet[0] != ip_version.echo_reply_type() || packet[1] != ICMP_CODE_ECHO {
         return Ok(None);
     }
-    let echo: Echo = match echo_codec::decode_header(&buf[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN])
-    {
-        Ok(e) => e,
-        Err(_) => return Ok(None),
-    };
+    let echo: Echo =
+        match echo_codec::decode_header(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]) {
+            Ok(e) => e,
+            Err(_) => return Ok(None),
+        };
     Ok(Some(Response {
         id: echo.id,
         timestamp: Instant::now(),
-        size: n - DATA_OFFSET,
+        size: packet.len() - DATA_OFFSET,
         ttl,
     }))
 }
@@ -84,6 +116,7 @@ pub fn try_parse_icmp_response(
 pub struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
     remote: SocketAddr,
+    ip_version: IpVersion,
 }
 
 impl IcmpClientTransport {
@@ -96,11 +129,8 @@ impl IcmpClientTransport {
         remote: SocketAddr,
         tos: Option<TrafficClass>,
     ) -> io::Result<Self> {
-        let (domain, protocol) = if is_ipv6(&remote) {
-            (Domain::IPV6, Protocol::ICMPV6)
-        } else {
-            (Domain::IPV4, Protocol::ICMPV4)
-        };
+        let ip_version = IpVersion::from_addr(remote);
+        let (domain, protocol) = ip_version.socket_domain_and_protocol();
 
         let sock = Socket::new(domain, Type::DGRAM, Some(protocol)).map_err(|e| {
             io::Error::new(
@@ -135,13 +165,14 @@ impl IcmpClientTransport {
         Ok(IcmpClientTransport {
             sock: Arc::new(sock),
             remote,
+            ip_version,
         })
     }
 }
 
 impl Transport for IcmpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let packet = build_icmp_packet(req, is_ipv6(&self.remote))?;
+        let packet = build_icmp_packet(req, self.ip_version)?;
         let ts = Instant::now();
         self.sock.send_to(&packet, self.remote).await?;
         Ok(ts)
@@ -149,7 +180,6 @@ impl Transport for IcmpClientTransport {
 
     async fn recv(&self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
-        let reply_type: u8 = if is_ipv6(&self.remote) { 129 } else { 0 };
 
         loop {
             let (n, addr, ttl) = match recv_from_with_ttl(&self.sock, &mut buf).await {
@@ -161,7 +191,7 @@ impl Transport for IcmpClientTransport {
                 continue;
             }
 
-            if let Some(resp) = try_parse_icmp_response(&buf, n, reply_type, ttl)? {
+            if let Some(resp) = try_parse_icmp_response(&buf[..n], self.ip_version, ttl)? {
                 return Ok(resp);
             }
         }
@@ -344,10 +374,10 @@ mod tests {
             request_size: Some(PING_HDR_LEN as u16),
             response_size: None,
         };
-        let packet = build_icmp_packet(&req, false).unwrap();
+        let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
-        assert_eq!(packet[0], 8, "type = echo request");
-        assert_eq!(packet[1], 0, "code = 0");
+        assert_eq!(packet[0], ICMPV4_ECHO_REQUEST, "type = echo request");
+        assert_eq!(packet[1], ICMP_CODE_ECHO, "code = 0");
         assert_eq!(packet.len(), ICMP_HEADER_LEN + PING_HDR_LEN);
         assert_eq!(packet[6], 0xAB);
         assert_eq!(packet[7], 0xCD);
@@ -366,7 +396,7 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let packet = build_icmp_packet(&req, false).unwrap();
+        let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
         let verify = csum16_slice(&packet);
         assert_eq!(verify, 0, "verified checksum must be zero");
@@ -379,9 +409,9 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let packet = build_icmp_packet(&req, true).unwrap();
+        let packet = build_icmp_packet(&req, IpVersion::V6).unwrap();
 
-        assert_eq!(packet[0], 128, "type = echo request v6");
+        assert_eq!(packet[0], ICMPV6_ECHO_REQUEST, "type = echo request v6");
         assert_eq!(packet[2], 0, "no checksum set for v6");
         assert_eq!(packet[3], 0);
     }
@@ -394,7 +424,7 @@ mod tests {
                 request_size: Some(size),
                 response_size: None,
             };
-            let packet = build_icmp_packet(&req, false).unwrap();
+            let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
             assert_eq!(packet.len(), ICMP_HEADER_LEN + size as usize);
 
             let verify = csum16_slice(&packet);
@@ -414,7 +444,7 @@ mod tests {
             request_size: Some(100),
             response_size: Some(200),
         };
-        let packet = build_icmp_packet(&req, false).unwrap();
+        let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
         let echo =
             echo_codec::decode_header(&packet[DATA_OFFSET..DATA_OFFSET + PING_HDR_LEN]).unwrap();
@@ -431,12 +461,12 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let send_pkt = build_icmp_packet(&req, false).unwrap();
+        let send_pkt = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
         let mut reply = send_pkt.clone();
-        reply[0] = 0;
+        reply[0] = ICMPV4_ECHO_REPLY;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0, Some(64)).unwrap();
+        let result = try_parse_icmp_response(&reply, IpVersion::V4, Some(64)).unwrap();
         assert!(result.is_some());
         let result = result.unwrap();
         assert_eq!(result.id, 7);
@@ -451,13 +481,13 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let send_pkt = build_icmp_packet(&req, false).unwrap();
+        let send_pkt = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
         let mut reply = send_pkt.clone();
         reply[0] = 3;
-        reply[1] = 0;
+        reply[1] = ICMP_CODE_ECHO;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0, None).unwrap();
+        let result = try_parse_icmp_response(&reply, IpVersion::V4, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -468,34 +498,34 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let send_pkt = build_icmp_packet(&req, false).unwrap();
+        let send_pkt = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
         let mut reply = send_pkt.clone();
         reply[1] = 1;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 0, None).unwrap();
+        let result = try_parse_icmp_response(&reply, IpVersion::V4, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn try_parse_icmp_too_short() {
-        let result = try_parse_icmp_response(&[0u8; 4], 4, 0, None).unwrap();
+        let result = try_parse_icmp_response(&[0u8; 4], IpVersion::V4, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn try_parse_icmp_just_below_minimum() {
         let buf = vec![0u8; DATA_OFFSET + PING_HDR_LEN - 1];
-        let result = try_parse_icmp_response(&buf, buf.len(), 0, None).unwrap();
+        let result = try_parse_icmp_response(&buf, IpVersion::V4, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn try_parse_icmp_any_valid_bytes_accepted() {
         let mut buf = vec![0xffu8; DATA_OFFSET + PING_HDR_LEN];
-        buf[0] = 0;
-        buf[1] = 0;
-        let result = try_parse_icmp_response(&buf, buf.len(), 0, None).unwrap();
+        buf[0] = ICMPV4_ECHO_REPLY;
+        buf[1] = ICMP_CODE_ECHO;
+        let result = try_parse_icmp_response(&buf, IpVersion::V4, None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, u64::MAX);
     }
@@ -507,12 +537,12 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let send_pkt = build_icmp_packet(&req, true).unwrap();
+        let send_pkt = build_icmp_packet(&req, IpVersion::V6).unwrap();
 
         let mut reply = send_pkt.clone();
-        reply[0] = 129;
+        reply[0] = ICMPV6_ECHO_REPLY;
 
-        let result = try_parse_icmp_response(&reply, reply.len(), 129, None).unwrap();
+        let result = try_parse_icmp_response(&reply, IpVersion::V6, None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, 10);
     }
@@ -566,14 +596,6 @@ mod tests {
     fn csum16_add_both_max() {
         let result = csum16_add(0xFFFF, 0xFFFF);
         assert_eq!(result, 0xFFFF);
-    }
-
-    #[test]
-    fn is_ipv6_detection() {
-        let v4: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let v6: SocketAddr = "[::1]:0".parse().unwrap();
-        assert!(!is_ipv6(&v4));
-        assert!(is_ipv6(&v6));
     }
 
     #[tokio::test]

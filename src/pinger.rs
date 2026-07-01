@@ -146,13 +146,9 @@ async fn wait_for_next_request(send_mode: &mut SendMode, stop_at: Option<TokioIn
                 tokio::select! {
                     signal = channel.recv() => signal.is_some(),
                     _ = sleep_until(stop_at) => false,
-                    _ = tokio::signal::ctrl_c() => false,
                 }
             } else {
-                tokio::select! {
-                    signal = channel.recv() => signal.is_some(),
-                    _ = tokio::signal::ctrl_c() => false,
-                }
+                channel.recv().await.is_some()
             }
         }
         SendMode::Interval(interval) => {
@@ -160,13 +156,10 @@ async fn wait_for_next_request(send_mode: &mut SendMode, stop_at: Option<TokioIn
                 tokio::select! {
                     _ = sleep(*interval) => true,
                     _ = sleep_until(stop_at) => false,
-                    _ = tokio::signal::ctrl_c() => false,
                 }
             } else {
-                tokio::select! {
-                    _ = sleep(*interval) => true,
-                    _ = tokio::signal::ctrl_c() => false,
-                }
+                sleep(*interval).await;
+                true
             }
         }
     }

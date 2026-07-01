@@ -19,48 +19,37 @@ pub async fn transmitter(
     mut from_generator: Receiver<Request>,
     to_statista: Sender<StatEntry>,
 ) {
-    loop {
-        let r = from_generator.recv().await;
-        match r {
-            Some(req) => match transport.send(&req).await {
-                Ok(timestamp) => {
-                    let s = StatEntry::Open(Entry {
-                        id: req.id,
-                        ts: timestamp,
-                    });
-                    if to_statista.send(s).await.is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("transport error: send failed: {e}");
+    while let Some(req) = from_generator.recv().await {
+        match transport.send(&req).await {
+            Ok(timestamp) => {
+                let s = StatEntry::Open(Entry {
+                    id: req.id,
+                    ts: timestamp,
+                });
+                if to_statista.send(s).await.is_err() {
                     break;
                 }
-            },
-            None => break,
+            }
+            Err(e) => {
+                eprintln!("transport error: send failed: {e}");
+                break;
+            }
         }
     }
 }
 
 pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>) {
     loop {
-        tokio::select! {
-            result = transport.recv() => {
-                match result {
-                    Ok(req) => {
-                        let s = StatEntry::Close(req);
-                        if to_statista.send(s).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("transport error: recv failed: {e}");
-                        break;
-                    }
+        match transport.recv().await {
+            Ok(req) => {
+                let s = StatEntry::Close(req);
+                if to_statista.send(s).await.is_err() {
+                    break;
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                return;
+            Err(e) => {
+                eprintln!("transport error: recv failed: {e}");
+                break;
             }
         }
     }

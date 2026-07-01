@@ -13,11 +13,44 @@ use tokio::time::timeout;
 
 use crate::TrafficClass;
 use crate::echo_codec;
-use crate::pinger::{PING_HDR_LEN, Request, Response};
+use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::tos as traffic;
 use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+enum TcpServerReadError {
+    Closed,
+    Header(io::Error),
+    Payload(io::Error),
+    Decode(io::Error),
+}
+
+async fn read_tcp_request(sock: &mut TcpStream) -> Result<Echo, TcpServerReadError> {
+    let mut hdr_buf = [0; PING_HDR_LEN];
+    sock.read_exact(&mut hdr_buf).await.map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            TcpServerReadError::Closed
+        } else {
+            TcpServerReadError::Header(e)
+        }
+    })?;
+
+    let req = echo_codec::decode_header(&hdr_buf).map_err(TcpServerReadError::Decode)?;
+
+    if req.len as usize > PING_HDR_LEN {
+        let mut extra = vec![0; req.len as usize - PING_HDR_LEN];
+        sock.read_exact(&mut extra).await.map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                TcpServerReadError::Closed
+            } else {
+                TcpServerReadError::Payload(e)
+            }
+        })?;
+    }
+
+    Ok(req)
+}
 
 async fn server_connection_handler(mut sock: TcpStream) {
     let peer_addr = match sock.peer_addr() {
@@ -27,35 +60,25 @@ async fn server_connection_handler(mut sock: TcpStream) {
     println!("New TCP connection from {peer_addr}");
 
     loop {
-        let mut hdr_buf = [0; PING_HDR_LEN];
-        if let Err(e) = sock.read_exact(&mut hdr_buf).await {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
+        let req = match read_tcp_request(&mut sock).await {
+            Ok(req) => req,
+            Err(TcpServerReadError::Closed) => {
                 println!("Connection closed: {peer_addr}");
-            } else {
-                eprintln!("Error reading from {peer_addr}: {e}");
+                break;
             }
-            break;
-        }
-
-        let req = match echo_codec::decode_header(&hdr_buf) {
-            Ok(r) => r,
-            Err(e) => {
+            Err(TcpServerReadError::Header(e)) => {
+                eprintln!("Error reading from {peer_addr}: {e}");
+                break;
+            }
+            Err(TcpServerReadError::Payload(e)) => {
+                eprintln!("Error reading request payload from {peer_addr}: {e}");
+                break;
+            }
+            Err(TcpServerReadError::Decode(e)) => {
                 eprintln!("Failed to deserialize request from {peer_addr}: {e}");
                 break;
             }
         };
-
-        if req.len as usize > PING_HDR_LEN {
-            let mut extra = vec![0; req.len as usize - PING_HDR_LEN];
-            if let Err(e) = sock.read_exact(&mut extra).await {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    println!("Connection closed: {peer_addr}");
-                } else {
-                    eprintln!("Error reading request payload from {peer_addr}: {e}");
-                }
-                break;
-            }
-        }
 
         let send_buf = match echo_codec::encode_response(req) {
             Ok(b) => b,

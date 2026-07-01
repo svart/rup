@@ -6,7 +6,8 @@ mod tos;
 pub mod transport;
 
 pub use pinger::{
-    Echo, Entry, GeneratorConfig, PING_HDR_LEN, Request, Response, SendMode, StatEntry, generator,
+    Echo, Entry, GeneratorConfig, PING_HDR_LEN, PacketSize, Request, Response, SendMode, StatEntry,
+    generator,
 };
 pub use protocol::Protocol;
 pub use statistics::{RttSequence, statista, statista_with_collector};
@@ -199,12 +200,12 @@ impl Pinger {
         self
     }
 
-    pub fn request_size(mut self, size: u16) -> Self {
+    pub fn request_size(mut self, size: PacketSize) -> Self {
         self.config.request_size = Some(size);
         self
     }
 
-    pub fn response_size(mut self, size: u16) -> Self {
+    pub fn response_size(mut self, size: PacketSize) -> Self {
         self.config.response_size = Some(size);
         self
     }
@@ -237,8 +238,8 @@ pub struct PingConfig {
     pub interval: Duration,
     pub adaptive: bool,
     pub wait_time: Duration,
-    pub request_size: Option<u16>,
-    pub response_size: Option<u16>,
+    pub request_size: Option<PacketSize>,
+    pub response_size: Option<PacketSize>,
     pub tos: Option<TrafficClass>,
     pub ping_number: Option<u64>,
     pub run_time: Option<Duration>,

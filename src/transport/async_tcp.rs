@@ -197,6 +197,7 @@ impl Transport for TcpClientTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PacketSize;
     use tokio::io::AsyncReadExt;
 
     #[test]
@@ -217,7 +218,7 @@ mod tests {
     fn encode_request_padded() {
         let req = Request {
             id: 99,
-            request_size: Some(64),
+            request_size: Some(PacketSize::new(64).unwrap()),
             response_size: None,
         };
         let buf = echo_codec::encode_request(&req).unwrap();
@@ -229,8 +230,8 @@ mod tests {
     fn encode_request_with_resp_size() {
         let req = Request {
             id: 5,
-            request_size: Some(50),
-            response_size: Some(200),
+            request_size: Some(PacketSize::new(50).unwrap()),
+            response_size: Some(PacketSize::new(200).unwrap()),
         };
         let buf = echo_codec::encode_request(&req).unwrap();
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
@@ -242,8 +243,8 @@ mod tests {
     fn decode_header_valid() {
         let req = Request {
             id: 42,
-            request_size: Some(100),
-            response_size: Some(200),
+            request_size: Some(PacketSize::new(100).unwrap()),
+            response_size: Some(PacketSize::new(200).unwrap()),
         };
         let buf = echo_codec::encode_request(&req).unwrap();
         let mut hdr = [0u8; PING_HDR_LEN];
@@ -290,7 +291,7 @@ mod tests {
 
         let req = Request {
             id: 42,
-            request_size: Some(PING_HDR_LEN as u16),
+            request_size: Some(PacketSize::new(PING_HDR_LEN as u16).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();
@@ -326,7 +327,7 @@ mod tests {
 
         let req = Request {
             id: 99,
-            request_size: Some(64),
+            request_size: Some(PacketSize::new(64).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();
@@ -354,7 +355,7 @@ mod tests {
 
         let req = Request {
             id: 0,
-            request_size: Some(PING_HDR_LEN as u16),
+            request_size: Some(PacketSize::new(PING_HDR_LEN as u16).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();
@@ -390,7 +391,7 @@ mod tests {
 
         let req = Request {
             id: 7,
-            request_size: Some(512),
+            request_size: Some(PacketSize::new(512).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();

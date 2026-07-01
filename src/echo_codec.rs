@@ -1,13 +1,16 @@
 use std::io;
 use std::time::Instant;
 
-use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
+use crate::pinger::{Echo, PING_HDR_LEN, PacketSize, Request, Response};
 
 pub fn encode_request(req: &Request) -> io::Result<Vec<u8>> {
     let echo = Echo {
         id: req.id,
-        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-        resp_size: req.response_size.unwrap_or(0),
+        len: req
+            .request_size
+            .map(PacketSize::get)
+            .unwrap_or(PING_HDR_LEN as u16),
+        resp_size: req.response_size.map(PacketSize::get).unwrap_or(0),
     };
 
     Ok(encode_echo(&echo, echo.len as usize))

@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::TrafficClass;
 use crate::echo_codec;
-use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
+use crate::pinger::{Echo, PING_HDR_LEN, PacketSize, Request, Response};
 use crate::tos as traffic;
 use crate::transport::Transport;
 
@@ -56,8 +56,11 @@ impl IpVersion {
 pub fn build_icmp_packet(req: &Request, ip_version: IpVersion) -> io::Result<Vec<u8>> {
     let r = Echo {
         id: req.id,
-        len: req.request_size.unwrap_or(PING_HDR_LEN as u16),
-        resp_size: req.response_size.unwrap_or(0),
+        len: req
+            .request_size
+            .map(PacketSize::get)
+            .unwrap_or(PING_HDR_LEN as u16),
+        resp_size: req.response_size.map(PacketSize::get).unwrap_or(0),
     };
 
     let seq_bytes = (req.id as u16).to_be_bytes();
@@ -75,7 +78,10 @@ pub fn build_icmp_packet(req: &Request, ip_version: IpVersion) -> io::Result<Vec
 
     let payload = echo_codec::encode_echo(&r, PING_HDR_LEN);
 
-    let data_len = req.request_size.unwrap_or(PING_HDR_LEN as u16) as usize;
+    let data_len = req
+        .request_size
+        .map(PacketSize::get)
+        .unwrap_or(PING_HDR_LEN as u16) as usize;
     packet.extend_from_slice(&payload);
     packet.resize(ICMP_HEADER_LEN + data_len, 0);
 
@@ -371,7 +377,7 @@ mod tests {
     fn build_icmp_v4_packet_structure() {
         let req = Request {
             id: 0xABCD,
-            request_size: Some(PING_HDR_LEN as u16),
+            request_size: Some(PacketSize::new(PING_HDR_LEN as u16).unwrap()),
             response_size: None,
         };
         let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
@@ -421,7 +427,7 @@ mod tests {
         for size in [PING_HDR_LEN as u16, 64, 128, 256, 512] {
             let req = Request {
                 id: 10,
-                request_size: Some(size),
+                request_size: Some(PacketSize::new(size).unwrap()),
                 response_size: None,
             };
             let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
@@ -441,8 +447,8 @@ mod tests {
     fn build_icmp_packet_with_resp_size() {
         let req = Request {
             id: 42,
-            request_size: Some(100),
-            response_size: Some(200),
+            request_size: Some(PacketSize::new(100).unwrap()),
+            response_size: Some(PacketSize::new(200).unwrap()),
         };
         let packet = build_icmp_packet(&req, IpVersion::V4).unwrap();
 
@@ -642,7 +648,7 @@ mod tests {
 
         let req = Request {
             id: 200,
-            request_size: Some(64),
+            request_size: Some(PacketSize::new(64).unwrap()),
             response_size: None,
         };
 

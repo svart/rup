@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use rup::pinger::PING_HDR_LEN;
-use rup::{Protocol, TrafficClass};
+use rup::{PacketSize, Protocol, TrafficClass};
 
 fn cli() -> Command {
     Command::new("rup")
@@ -145,8 +145,8 @@ pub(crate) struct PingerParams {
     pub interval: u64,
     pub adaptive: bool,
     pub wait_time: u64,
-    pub request_size: Option<u16>,
-    pub response_size: Option<u16>,
+    pub request_size: Option<PacketSize>,
+    pub response_size: Option<PacketSize>,
     pub tos: Option<TrafficClass>,
     pub ping_number: Option<u64>,
     pub protocol: Protocol,
@@ -185,8 +185,14 @@ where
             interval: *matches.get_one::<u64>("interval").unwrap(),
             adaptive: *matches.get_one::<bool>("adaptive-interval").unwrap(),
             wait_time: *matches.get_one::<u64>("wait-time").unwrap(),
-            request_size: matches.get_one::<u16>("req-size").copied(),
-            response_size: matches.get_one::<u16>("resp-size").copied(),
+            request_size: matches
+                .get_one::<u16>("req-size")
+                .copied()
+                .map(|size| PacketSize::new(size).expect("clap validates packet size")),
+            response_size: matches
+                .get_one::<u16>("resp-size")
+                .copied()
+                .map(|size| PacketSize::new(size).expect("clap validates packet size")),
             tos: matches.get_one::<u8>("tos").copied().map(TrafficClass::new),
             ping_number: matches.get_one::<u64>("ping-number").copied(),
             protocol: protocol_or_default(&matches, Protocol::Icmp),

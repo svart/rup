@@ -177,6 +177,7 @@ impl Transport for UdpClientTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PacketSize;
     use crate::pinger::Request;
 
     #[test]
@@ -197,7 +198,7 @@ mod tests {
     fn encode_request_padded() {
         let req = Request {
             id: 42,
-            request_size: Some(100),
+            request_size: Some(PacketSize::new(100).unwrap()),
             response_size: None,
         };
         let buf = echo_codec::encode_request(&req).unwrap();
@@ -211,8 +212,8 @@ mod tests {
     fn encode_request_with_resp_size() {
         let req = Request {
             id: 7,
-            request_size: Some(50),
-            response_size: Some(128),
+            request_size: Some(PacketSize::new(50).unwrap()),
+            response_size: Some(PacketSize::new(128).unwrap()),
         };
         let buf = echo_codec::encode_request(&req).unwrap();
         assert_eq!(buf.len(), 50);
@@ -226,7 +227,7 @@ mod tests {
     fn encode_request_zero_id() {
         let req = Request {
             id: 0,
-            request_size: Some(12),
+            request_size: Some(PacketSize::new(12).unwrap()),
             response_size: None,
         };
         let buf = echo_codec::encode_request(&req).unwrap();
@@ -284,7 +285,7 @@ mod tests {
 
         let req = Request {
             id: 7,
-            request_size: Some(PING_HDR_LEN as u16),
+            request_size: Some(PacketSize::new(PING_HDR_LEN as u16).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();
@@ -313,7 +314,7 @@ mod tests {
 
         let req = Request {
             id: 1,
-            request_size: Some(PING_HDR_LEN as u16),
+            request_size: Some(PacketSize::new(PING_HDR_LEN as u16).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();
@@ -343,7 +344,7 @@ mod tests {
 
         let req = Request {
             id: 2,
-            request_size: Some(100),
+            request_size: Some(PacketSize::new(100).unwrap()),
             response_size: None,
         };
         transport.send(&req).await.unwrap();

@@ -1,13 +1,62 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::{Instant as TokioInstant, sleep, sleep_until};
 
+pub const PING_HDR_LEN: usize =
+    std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSize(u16);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSizeError {
+    value: u16,
+}
+
+impl PacketSize {
+    pub const MIN: u16 = PING_HDR_LEN as u16;
+
+    pub fn new(value: u16) -> Result<Self, PacketSizeError> {
+        if value >= Self::MIN {
+            Ok(Self(value))
+        } else {
+            Err(PacketSizeError { value })
+        }
+    }
+
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl TryFrom<u16> for PacketSize {
+    type Error = PacketSizeError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for PacketSizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "packet size {} is smaller than {}",
+            self.value,
+            PacketSize::MIN
+        )
+    }
+}
+
+impl std::error::Error for PacketSizeError {}
+
 #[derive(Clone, Debug)]
 pub struct Request {
     pub id: u64,
-    pub request_size: Option<u16>,
-    pub response_size: Option<u16>,
+    pub request_size: Option<PacketSize>,
+    pub response_size: Option<PacketSize>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,8 +86,8 @@ pub struct GeneratorConfig {
     pub send_mode: SendMode,
     pub ping_number: Option<u64>,
     pub run_time: Option<Duration>,
-    pub request_size: Option<u16>,
-    pub response_size: Option<u16>,
+    pub request_size: Option<PacketSize>,
+    pub response_size: Option<PacketSize>,
 }
 
 impl GeneratorConfig {
@@ -59,9 +108,6 @@ pub struct Echo {
     pub len: u16,
     pub resp_size: u16,
 }
-
-pub const PING_HDR_LEN: usize =
-    std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
 
 pub async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: GeneratorConfig) {
     let mut id: u64 = 0;
@@ -219,14 +265,14 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(8);
             tx.send(Request {
                 id: 7,
-                request_size: Some(64),
-                response_size: Some(32),
+                request_size: Some(PacketSize::new(64).unwrap()),
+                response_size: Some(PacketSize::new(32).unwrap()),
             })
             .await
             .unwrap();
             let req = rx.recv().await.unwrap();
             assert_eq!(req.id, 7);
-            assert_eq!(req.request_size, Some(64));
+            assert_eq!(req.request_size, Some(PacketSize::new(64).unwrap()));
         });
     }
 
@@ -299,14 +345,14 @@ mod tests {
                 send_mode: SendMode::Interval(Duration::from_millis(1)),
                 ping_number: Some(1),
                 run_time: None,
-                request_size: Some(100),
-                response_size: Some(200),
+                request_size: Some(PacketSize::new(100).unwrap()),
+                response_size: Some(PacketSize::new(200).unwrap()),
             },
         ));
 
         let req = rx.recv().await.unwrap();
-        assert_eq!(req.request_size, Some(100));
-        assert_eq!(req.response_size, Some(200));
+        assert_eq!(req.request_size, Some(PacketSize::new(100).unwrap()));
+        assert_eq!(req.response_size, Some(PacketSize::new(200).unwrap()));
     }
 
     #[tokio::test]

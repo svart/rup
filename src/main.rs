@@ -7,13 +7,13 @@ use tokio::runtime;
 mod cli;
 
 use cli::CliParams::{PingerParams, ServerParams};
-use rup::{PING_HDR_LEN, PingConfig, PingEvent, PingReport, PingResult, Protocol};
+use rup::{PING_HDR_LEN, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
 
 struct OutputContext {
     target: String,
     remote: SocketAddr,
     protocol: Protocol,
-    request_size: Option<u16>,
+    request_size: Option<PacketSize>,
 }
 
 async fn resolve_remote_address(remote: &str, protocol: Protocol) -> io::Result<SocketAddr> {
@@ -36,7 +36,9 @@ fn fmt_duration_ms_value(d: Duration) -> String {
 }
 
 fn data_size(ctx: &OutputContext) -> usize {
-    ctx.request_size.unwrap_or(PING_HDR_LEN as u16) as usize
+    ctx.request_size
+        .map(PacketSize::get)
+        .unwrap_or(PING_HDR_LEN as u16) as usize
 }
 
 fn total_packet_size(ctx: &OutputContext) -> usize {
@@ -212,7 +214,7 @@ mod tests {
             target: "127.0.0.1".to_string(),
             remote: "127.0.0.1:0".parse().unwrap(),
             protocol: Protocol::Icmp,
-            request_size: Some(56),
+            request_size: Some(PacketSize::new(56).unwrap()),
         };
 
         assert_eq!(

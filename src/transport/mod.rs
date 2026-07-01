@@ -69,6 +69,7 @@ pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PacketSize;
     use tokio::sync::mpsc;
 
     struct MockTransport {
@@ -250,8 +251,8 @@ mod tests {
         req_tx
             .send(Request {
                 id: 10,
-                request_size: Some(64),
-                response_size: Some(128),
+                request_size: Some(PacketSize::new(64).unwrap()),
+                response_size: Some(PacketSize::new(128).unwrap()),
             })
             .await
             .unwrap();

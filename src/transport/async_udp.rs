@@ -13,14 +13,6 @@ use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::tos as traffic;
 use crate::transport::Transport;
 
-pub fn build_udp_echo(req: &Request) -> io::Result<Vec<u8>> {
-    echo_codec::encode_request(req)
-}
-
-pub fn parse_udp_response(buf: &[u8]) -> io::Result<Response> {
-    echo_codec::decode_response(buf)
-}
-
 pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
     server_transport_until(local_address, async {
         let _ = tokio::signal::ctrl_c().await;
@@ -165,7 +157,7 @@ impl UdpClientTransport {
 
 impl Transport for UdpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let send_buf = build_udp_echo(req)?;
+        let send_buf = echo_codec::encode_request(req)?;
         let timestamp = Instant::now();
         self.socket.send(&send_buf).await?;
         Ok(timestamp)
@@ -174,7 +166,7 @@ impl Transport for UdpClientTransport {
     async fn recv(&self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
         let n = self.socket.recv(&mut buf).await?;
-        parse_udp_response(&buf[..n])
+        echo_codec::decode_response(&buf[..n])
     }
 }
 
@@ -184,13 +176,13 @@ mod tests {
     use crate::pinger::Request;
 
     #[test]
-    fn build_udp_echo_default_size() {
+    fn encode_request_default_size() {
         let req = Request {
             id: 10,
             request_size: None,
             response_size: None,
         };
-        let buf = build_udp_echo(&req).unwrap();
+        let buf = echo_codec::encode_request(&req).unwrap();
         assert_eq!(buf.len(), PING_HDR_LEN);
         let echo = echo_codec::decode_header(&buf).unwrap();
         assert_eq!(echo.id, 10);
@@ -198,13 +190,13 @@ mod tests {
     }
 
     #[test]
-    fn build_udp_echo_padded() {
+    fn encode_request_padded() {
         let req = Request {
             id: 42,
             request_size: Some(100),
             response_size: None,
         };
-        let buf = build_udp_echo(&req).unwrap();
+        let buf = echo_codec::encode_request(&req).unwrap();
         assert_eq!(buf.len(), 100);
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 42);
@@ -212,13 +204,13 @@ mod tests {
     }
 
     #[test]
-    fn build_udp_echo_with_resp_size() {
+    fn encode_request_with_resp_size() {
         let req = Request {
             id: 7,
             request_size: Some(50),
             response_size: Some(128),
         };
-        let buf = build_udp_echo(&req).unwrap();
+        let buf = echo_codec::encode_request(&req).unwrap();
         assert_eq!(buf.len(), 50);
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 7);
@@ -227,47 +219,47 @@ mod tests {
     }
 
     #[test]
-    fn build_udp_echo_zero_id() {
+    fn encode_request_zero_id() {
         let req = Request {
             id: 0,
             request_size: Some(12),
             response_size: None,
         };
-        let buf = build_udp_echo(&req).unwrap();
+        let buf = echo_codec::encode_request(&req).unwrap();
         let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
         assert_eq!(echo.id, 0);
     }
 
     #[test]
-    fn parse_udp_response_valid() {
+    fn decode_response_valid() {
         let req = Request {
             id: 99,
             request_size: None,
             response_size: None,
         };
-        let buf = build_udp_echo(&req).unwrap();
-        let resp = parse_udp_response(&buf).unwrap();
+        let buf = echo_codec::encode_request(&req).unwrap();
+        let resp = echo_codec::decode_response(&buf).unwrap();
         assert_eq!(resp.id, 99);
     }
 
     #[test]
-    fn parse_udp_response_too_short() {
+    fn decode_response_too_short() {
         let buf = [0u8; 4];
-        let result = parse_udp_response(&buf);
+        let result = echo_codec::decode_response(&buf);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn parse_udp_response_any_bytes_decodes() {
+    fn decode_response_any_bytes_decodes() {
         let buf = [0xff; PING_HDR_LEN];
-        let resp = parse_udp_response(&buf).unwrap();
+        let resp = echo_codec::decode_response(&buf).unwrap();
         assert_eq!(resp.id, u64::MAX);
     }
 
     #[test]
-    fn parse_udp_response_empty() {
-        let result = parse_udp_response(&[]);
+    fn decode_response_empty() {
+        let result = echo_codec::decode_response(&[]);
         assert!(result.is_err());
     }
 
@@ -394,7 +386,7 @@ mod tests {
             request_size: None,
             response_size: None,
         };
-        let packet = build_udp_echo(&req)?;
+        let packet = echo_codec::encode_request(&req)?;
         client_sock.send_to(&packet, server_addr).await?;
 
         let mut buf = [0u8; 64];

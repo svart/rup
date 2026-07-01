@@ -1,14 +1,10 @@
-#[cfg(test)]
-use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp::Ordering, collections::VecDeque};
 
-#[cfg(test)]
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::sleep;
 
-use crate::pinger::{Entry, StatEntry};
+use crate::pinger::{Entry, Response, StatEntry};
 use crate::{PingEvent, PingResult};
 
 pub(crate) fn loss_pct(sent: u64, received: u64) -> f64 {
@@ -47,64 +43,40 @@ pub(crate) fn std_deviation(rtts: &[Duration]) -> Option<Duration> {
     Some(Duration::from_secs_f64(variance.sqrt() / 1_000_000_000.))
 }
 
-#[cfg(test)]
-async fn receive_timeout(
-    index: u64,
-    req_mutex: Arc<Mutex<VecDeque<Entry>>>,
-    wait_time: Duration,
-    to_generator: Option<Sender<()>>,
-) {
-    sleep(wait_time).await;
-
-    let mut requests = req_mutex.lock().await;
-
-    while let Some(req) = requests.front() {
-        if req.id <= index {
-            requests.pop_front();
-
-            if let Some(gen_channel) = &to_generator {
-                let _ = gen_channel.send(()).await;
-            }
-        } else {
-            break;
-        }
-    }
-}
-
 enum StatSink {
     None,
     Events(Sender<PingEvent>),
     Collector(Sender<PingResult>),
 }
 
+impl StatSink {
+    async fn event(&self, event: PingEvent) {
+        if let StatSink::Events(sender) = self {
+            let _ = sender.send(event).await;
+        }
+    }
+
+    async fn reply(&self, result: PingResult) {
+        match self {
+            StatSink::None => {}
+            StatSink::Events(sender) => {
+                let _ = sender.send(PingEvent::Reply(result)).await;
+            }
+            StatSink::Collector(sender) => {
+                let _ = sender.send(result).await;
+            }
+        }
+    }
+}
+
+enum ResponseMatch {
+    Matched(PingResult),
+    ReorderOrLoss { seq: u64 },
+}
+
 async fn signal_generator(to_generator: &Option<Sender<()>>) {
     if let Some(gen_channel) = to_generator {
         let _ = gen_channel.send(()).await;
-    }
-}
-
-async fn emit_reply(sink: &StatSink, seq: u64, rtt: Duration, size: usize, ttl: Option<u8>) {
-    let result = PingResult {
-        seq,
-        rtt,
-        size,
-        ttl,
-    };
-
-    match sink {
-        StatSink::None => {}
-        StatSink::Events(sender) => {
-            let _ = sender.send(PingEvent::Reply(result)).await;
-        }
-        StatSink::Collector(sender) => {
-            let _ = sender.send(result).await;
-        }
-    }
-}
-
-async fn emit_event(sink: &StatSink, event: PingEvent) {
-    if let StatSink::Events(sender) = sink {
-        let _ = sender.send(event).await;
     }
 }
 
@@ -120,9 +92,34 @@ async fn expire_timed_out(
         }
 
         let req = requests.pop_front().expect("front checked above");
-        emit_event(sink, PingEvent::Timeout { seq: req.id }).await;
+        sink.event(PingEvent::Timeout { seq: req.id }).await;
         signal_generator(to_generator).await;
     }
+}
+
+fn match_response(requests: &mut VecDeque<Entry>, response: Response) -> Vec<ResponseMatch> {
+    let mut matches = Vec::new();
+
+    while let Some(req) = requests.pop_front() {
+        match response.id.cmp(&req.id) {
+            Ordering::Greater => {
+                matches.push(ResponseMatch::ReorderOrLoss { seq: req.id });
+                continue;
+            }
+            Ordering::Equal => {
+                matches.push(ResponseMatch::Matched(PingResult {
+                    seq: response.id,
+                    rtt: response.timestamp.duration_since(req.ts),
+                    size: response.size,
+                    ttl: response.ttl,
+                }));
+            }
+            Ordering::Less => requests.push_front(req),
+        }
+        break;
+    }
+
+    matches
 }
 
 async fn run_statista_core(
@@ -151,24 +148,17 @@ async fn run_statista_core(
                         requests.push_back(t);
                     }
                     StatEntry::Close(t) => {
-                        let index = t.id;
-
-                        while let Some(req) = requests.pop_front() {
-                            match index.cmp(&req.id) {
-                                Ordering::Greater => {
-                                    emit_event(&sink, PingEvent::ReorderOrLoss { seq: req.id })
-                                        .await;
-                                    continue;
-                                }
-                                Ordering::Equal => {
-                                    let rtt = t.timestamp.duration_since(req.ts);
-                                    rtts.push(rtt);
+                        for response_match in match_response(&mut requests, t) {
+                            match response_match {
+                                ResponseMatch::Matched(result) => {
+                                    rtts.push(result.rtt);
                                     signal_generator(&to_generator).await;
-                                    emit_reply(&sink, index, rtt, t.size, t.ttl).await;
+                                    sink.reply(result).await;
                                 }
-                                Ordering::Less => requests.push_front(req),
+                                ResponseMatch::ReorderOrLoss { seq } => {
+                                    sink.event(PingEvent::ReorderOrLoss { seq }).await;
+                                }
                             }
-                            break;
                         }
                     }
                 }
@@ -514,89 +504,6 @@ mod tests {
             }
             break;
         }
-        assert!(requests.is_empty());
-    }
-
-    #[tokio::test]
-    async fn receive_timeout_removes_entry() {
-        let entry = Entry {
-            id: 42,
-            ts: Instant::now(),
-        };
-        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
-
-        receive_timeout(42, req_mutex.clone(), Duration::from_millis(1), None).await;
-
-        let requests = req_mutex.lock().await;
-        assert!(requests.is_empty());
-    }
-
-    #[tokio::test]
-    async fn receive_timeout_removes_older_entries() {
-        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
-            Entry {
-                id: 0,
-                ts: Instant::now(),
-            },
-            Entry {
-                id: 1,
-                ts: Instant::now(),
-            },
-            Entry {
-                id: 2,
-                ts: Instant::now(),
-            },
-        ])));
-
-        receive_timeout(1, req_mutex.clone(), Duration::from_millis(1), None).await;
-
-        let requests = req_mutex.lock().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].id, 2);
-    }
-
-    #[tokio::test]
-    async fn receive_timeout_removes_entries_up_to_index() {
-        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![
-            Entry {
-                id: 3,
-                ts: Instant::now(),
-            },
-            Entry {
-                id: 7,
-                ts: Instant::now(),
-            },
-        ])));
-
-        receive_timeout(5, req_mutex.clone(), Duration::from_millis(1), None).await;
-
-        let requests = req_mutex.lock().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].id, 7);
-    }
-
-    #[tokio::test]
-    async fn receive_timeout_signals_generator() {
-        let entry = Entry {
-            id: 0,
-            ts: Instant::now(),
-        };
-        let req_mutex = Arc::new(Mutex::new(VecDeque::from(vec![entry])));
-        let (gen_tx, mut gen_rx) = mpsc::channel(8);
-
-        receive_timeout(0, req_mutex.clone(), Duration::from_millis(1), Some(gen_tx)).await;
-
-        tokio::time::timeout(Duration::from_millis(100), gen_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn receive_timeout_empty_queue_no_panic() {
-        let req_mutex = Arc::new(Mutex::new(VecDeque::new()));
-        receive_timeout(0, req_mutex.clone(), Duration::from_millis(1), None).await;
-        let requests = req_mutex.lock().await;
         assert!(requests.is_empty());
     }
 

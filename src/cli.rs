@@ -5,6 +5,32 @@ use std::time::Duration;
 use rup::pinger::PING_HDR_LEN;
 use rup::{PacketSize, Protocol, TrafficClass};
 
+const ARG_REMOTE_ADDRESS: &str = "remote-address";
+const ARG_LOCAL_ADDRESS: &str = "local-address";
+const ARG_INTERVAL: &str = "interval";
+const ARG_ADAPTIVE_INTERVAL: &str = "adaptive-interval";
+const ARG_WAIT_TIME: &str = "wait-time";
+const ARG_REQUEST_SIZE: &str = "req-size";
+const ARG_RESPONSE_SIZE: &str = "resp-size";
+const ARG_TOS: &str = "tos";
+const ARG_PING_NUMBER: &str = "ping-number";
+const ARG_RUN_TIME: &str = "run-time";
+const ARG_PROTOCOL: &str = "protocol";
+const CMD_SERVER: &str = "server";
+
+const CLIENT_ARGS: &[&str] = &[
+    ARG_REMOTE_ADDRESS,
+    ARG_LOCAL_ADDRESS,
+    ARG_INTERVAL,
+    ARG_ADAPTIVE_INTERVAL,
+    ARG_WAIT_TIME,
+    ARG_REQUEST_SIZE,
+    ARG_RESPONSE_SIZE,
+    ARG_TOS,
+    ARG_PING_NUMBER,
+    ARG_RUN_TIME,
+];
+
 fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
@@ -12,13 +38,13 @@ fn cli() -> Command {
         .subcommand_negates_reqs(true)
         .arg_required_else_help(true)
         .arg(
-            Arg::new("remote-address")
+            Arg::new(ARG_REMOTE_ADDRESS)
                 .help("Where to send echo requests (host:port)")
                 .action(ArgAction::Set)
                 .required(true),
         )
         .arg(
-            Arg::new("local-address")
+            Arg::new(ARG_LOCAL_ADDRESS)
                 .long("local-address")
                 .help("Set local address to bind to")
                 .action(ArgAction::Set)
@@ -26,25 +52,25 @@ fn cli() -> Command {
                 .default_value("0.0.0.0:0"),
         )
         .arg(
-            Arg::new("interval")
+            Arg::new(ARG_INTERVAL)
                 .long("interval")
                 .short('i')
                 .help("Set interval in ms to send echo requests")
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(u64).range(1..))
                 .default_value("1000")
-                .conflicts_with("adaptive-interval"),
+                .conflicts_with(ARG_ADAPTIVE_INTERVAL),
         )
         .arg(
-            Arg::new("adaptive-interval")
+            Arg::new(ARG_ADAPTIVE_INTERVAL)
                 .long("adaptive-interval")
                 .short('A')
                 .help("Generate new request just after reception of response")
                 .action(ArgAction::SetTrue)
-                .conflicts_with("interval"),
+                .conflicts_with(ARG_INTERVAL),
         )
         .arg(
-            Arg::new("wait-time")
+            Arg::new(ARG_WAIT_TIME)
                 .long("wait-time")
                 .short('W')
                 .help("Time to wait for response in ms")
@@ -53,28 +79,28 @@ fn cli() -> Command {
                 .default_value("1000"),
         )
         .arg(
-            Arg::new("req-size")
+            Arg::new(ARG_REQUEST_SIZE)
                 .long("request-size")
                 .help("Size of echo request")
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
         )
         .arg(
-            Arg::new("resp-size")
+            Arg::new(ARG_RESPONSE_SIZE)
                 .long("response-size")
                 .help("Size of echo response")
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
         )
         .arg(
-            Arg::new("tos")
+            Arg::new(ARG_TOS)
                 .long("tos")
                 .help("Set outgoing IP TOS / IPv6 traffic class byte")
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(u8)),
         )
         .arg(
-            Arg::new("ping-number")
+            Arg::new(ARG_PING_NUMBER)
                 .long("ping-number")
                 .short('n')
                 .help("Amount of ping packets to send")
@@ -82,7 +108,7 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
-            Arg::new("run-time")
+            Arg::new(ARG_RUN_TIME)
                 .long("run-time")
                 .short('t')
                 .help("Amount of time to send packets")
@@ -90,10 +116,10 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .subcommand(
-            Command::new("server")
+            Command::new(CMD_SERVER)
                 .about("Receive requests and send them back immediately")
                 .arg(
-                    Arg::new("local-address")
+                    Arg::new(ARG_LOCAL_ADDRESS)
                         .help("Which address to listen to")
                         .action(ArgAction::Set)
                         .required(true)
@@ -101,7 +127,7 @@ fn cli() -> Command {
                 ),
         )
         .arg(
-            Arg::new("protocol")
+            Arg::new(ARG_PROTOCOL)
                 .long("protocol")
                 .short('p')
                 .help("Set protocol to use for ping")
@@ -111,20 +137,9 @@ fn cli() -> Command {
 }
 
 fn client_arg_used(matches: &clap::ArgMatches) -> bool {
-    [
-        "remote-address",
-        "local-address",
-        "interval",
-        "adaptive-interval",
-        "wait-time",
-        "req-size",
-        "resp-size",
-        "tos",
-        "ping-number",
-        "run-time",
-    ]
-    .iter()
-    .any(|arg| matches.value_source(arg) == Some(clap::parser::ValueSource::CommandLine))
+    CLIENT_ARGS
+        .iter()
+        .any(|arg| matches.value_source(arg) == Some(clap::parser::ValueSource::CommandLine))
 }
 
 pub(crate) struct ServerParams {
@@ -159,7 +174,7 @@ where
     let matches = cli().try_get_matches_from(args)?;
 
     Ok(match matches.subcommand() {
-        Some(("server", submatch)) => {
+        Some((CMD_SERVER, submatch)) => {
             if client_arg_used(&matches) {
                 return Err(clap::Error::raw(
                     clap::error::ErrorKind::ArgumentConflict,
@@ -168,35 +183,41 @@ where
             }
 
             CliParams::ServerParams(ServerParams {
-                local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
+                local_address: *submatch.get_one::<SocketAddr>(ARG_LOCAL_ADDRESS).unwrap(),
                 protocol: matches
-                    .get_one::<Protocol>("protocol")
+                    .get_one::<Protocol>(ARG_PROTOCOL)
                     .copied()
                     .unwrap_or(Protocol::Udp),
             })
         }
         None => CliParams::PingerParams(PingerParams {
-            remote_address: matches.get_one::<String>("remote-address").unwrap().clone(),
-            local_address: *matches.get_one::<SocketAddr>("local-address").unwrap(),
-            interval: Duration::from_millis(*matches.get_one::<u64>("interval").unwrap()),
-            adaptive: *matches.get_one::<bool>("adaptive-interval").unwrap(),
-            wait_time: Duration::from_millis(*matches.get_one::<u64>("wait-time").unwrap()),
+            remote_address: matches
+                .get_one::<String>(ARG_REMOTE_ADDRESS)
+                .unwrap()
+                .clone(),
+            local_address: *matches.get_one::<SocketAddr>(ARG_LOCAL_ADDRESS).unwrap(),
+            interval: Duration::from_millis(*matches.get_one::<u64>(ARG_INTERVAL).unwrap()),
+            adaptive: *matches.get_one::<bool>(ARG_ADAPTIVE_INTERVAL).unwrap(),
+            wait_time: Duration::from_millis(*matches.get_one::<u64>(ARG_WAIT_TIME).unwrap()),
             request_size: matches
-                .get_one::<u16>("req-size")
+                .get_one::<u16>(ARG_REQUEST_SIZE)
                 .copied()
                 .map(|size| PacketSize::new(size).expect("clap validates packet size")),
             response_size: matches
-                .get_one::<u16>("resp-size")
+                .get_one::<u16>(ARG_RESPONSE_SIZE)
                 .copied()
                 .map(|size| PacketSize::new(size).expect("clap validates packet size")),
-            tos: matches.get_one::<u8>("tos").copied().map(TrafficClass::new),
-            ping_number: matches.get_one::<u64>("ping-number").copied(),
+            tos: matches
+                .get_one::<u8>(ARG_TOS)
+                .copied()
+                .map(TrafficClass::new),
+            ping_number: matches.get_one::<u64>(ARG_PING_NUMBER).copied(),
             protocol: matches
-                .get_one::<Protocol>("protocol")
+                .get_one::<Protocol>(ARG_PROTOCOL)
                 .copied()
                 .unwrap_or(Protocol::Icmp),
             run_time: matches
-                .get_one::<u64>("run-time")
+                .get_one::<u64>(ARG_RUN_TIME)
                 .map(|d| Duration::from_secs(*d)),
         }),
         _ => unreachable!("clap validates subcommands"),

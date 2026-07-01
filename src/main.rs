@@ -88,12 +88,12 @@ fn packet_loss_line(report: &PingReport, elapsed: Duration) -> String {
 fn display_elapsed(
     elapsed: Duration,
     report: &PingReport,
-    interval: u64,
+    interval: Duration,
     adaptive: bool,
     ping_number: Option<u64>,
 ) -> Duration {
     if !adaptive && report.sent > 0 && ping_number == Some(report.sent) {
-        elapsed.saturating_sub(Duration::from_millis(interval))
+        elapsed.saturating_sub(interval)
     } else {
         elapsed
     }
@@ -158,9 +158,9 @@ fn main() {
                     remote: remote_address,
                     local: params.local_address,
                     protocol: params.protocol,
-                    interval: Duration::from_millis(params.interval),
+                    interval: params.interval,
                     adaptive: params.adaptive,
-                    wait_time: Duration::from_millis(params.wait_time),
+                    wait_time: params.wait_time,
                     request_size: params.request_size,
                     response_size: params.response_size,
                     tos: params.tos,
@@ -271,11 +271,23 @@ mod tests {
         };
 
         assert_eq!(
-            display_elapsed(Duration::from_millis(2004), &report, 1000, false, Some(2)),
+            display_elapsed(
+                Duration::from_millis(2004),
+                &report,
+                Duration::from_millis(1000),
+                false,
+                Some(2)
+            ),
             Duration::from_millis(1004)
         );
         assert_eq!(
-            display_elapsed(Duration::from_millis(2004), &report, 1000, true, Some(2)),
+            display_elapsed(
+                Duration::from_millis(2004),
+                &report,
+                Duration::from_millis(1000),
+                true,
+                Some(2)
+            ),
             Duration::from_millis(2004)
         );
     }

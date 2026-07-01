@@ -135,9 +135,9 @@ pub(crate) struct ServerParams {
 pub(crate) struct PingerParams {
     pub remote_address: String,
     pub local_address: SocketAddr,
-    pub interval: u64,
+    pub interval: Duration,
     pub adaptive: bool,
-    pub wait_time: u64,
+    pub wait_time: Duration,
     pub request_size: Option<PacketSize>,
     pub response_size: Option<PacketSize>,
     pub tos: Option<TrafficClass>,
@@ -178,9 +178,9 @@ where
         None => CliParams::PingerParams(PingerParams {
             remote_address: matches.get_one::<String>("remote-address").unwrap().clone(),
             local_address: *matches.get_one::<SocketAddr>("local-address").unwrap(),
-            interval: *matches.get_one::<u64>("interval").unwrap(),
+            interval: Duration::from_millis(*matches.get_one::<u64>("interval").unwrap()),
             adaptive: *matches.get_one::<bool>("adaptive-interval").unwrap(),
-            wait_time: *matches.get_one::<u64>("wait-time").unwrap(),
+            wait_time: Duration::from_millis(*matches.get_one::<u64>("wait-time").unwrap()),
             request_size: matches
                 .get_one::<u16>("req-size")
                 .copied()
@@ -407,7 +407,7 @@ mod tests {
             CliParams::PingerParams(params) => {
                 assert_eq!(params.protocol, Protocol::Icmp);
                 assert_eq!(params.remote_address, "127.0.0.1");
-                assert_eq!(params.interval, 300);
+                assert_eq!(params.interval, Duration::from_millis(300));
             }
             _ => panic!("expected pinger params"),
         }

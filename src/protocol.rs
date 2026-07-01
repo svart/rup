@@ -9,7 +9,19 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const VALUES: [&'static str; 3] = ["tcp", "udp", "icmp"];
+    pub const VALUES: [&'static str; 3] = [
+        Protocol::Tcp.as_str(),
+        Protocol::Udp.as_str(),
+        Protocol::Icmp.as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Protocol::Udp => "udp",
+            Protocol::Tcp => "tcp",
+            Protocol::Icmp => "icmp",
+        }
+    }
 
     pub fn requires_port(self) -> bool {
         matches!(self, Protocol::Udp | Protocol::Tcp)
@@ -18,12 +30,7 @@ impl Protocol {
 
 impl fmt::Display for Protocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Protocol::Udp => "udp",
-            Protocol::Tcp => "tcp",
-            Protocol::Icmp => "icmp",
-        };
-        f.write_str(value)
+        f.write_str(self.as_str())
     }
 }
 

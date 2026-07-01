@@ -106,15 +106,8 @@ fn cli() -> Command {
                 .short('p')
                 .help("Set protocol to use for ping")
                 .action(ArgAction::Set)
-                .value_parser(Protocol::VALUES),
+                .value_parser(clap::value_parser!(Protocol)),
         )
-}
-
-fn protocol_or_default(matches: &clap::ArgMatches, default: Protocol) -> Protocol {
-    matches
-        .get_one::<String>("protocol")
-        .map(|protocol| protocol.parse::<Protocol>().unwrap())
-        .unwrap_or(default)
 }
 
 fn client_arg_used(matches: &clap::ArgMatches) -> bool {
@@ -176,7 +169,10 @@ where
 
             CliParams::ServerParams(ServerParams {
                 local_address: *submatch.get_one::<SocketAddr>("local-address").unwrap(),
-                protocol: protocol_or_default(&matches, Protocol::Udp),
+                protocol: matches
+                    .get_one::<Protocol>("protocol")
+                    .copied()
+                    .unwrap_or(Protocol::Udp),
             })
         }
         None => CliParams::PingerParams(PingerParams {
@@ -195,7 +191,10 @@ where
                 .map(|size| PacketSize::new(size).expect("clap validates packet size")),
             tos: matches.get_one::<u8>("tos").copied().map(TrafficClass::new),
             ping_number: matches.get_one::<u64>("ping-number").copied(),
-            protocol: protocol_or_default(&matches, Protocol::Icmp),
+            protocol: matches
+                .get_one::<Protocol>("protocol")
+                .copied()
+                .unwrap_or(Protocol::Icmp),
             run_time: matches
                 .get_one::<u64>("run-time")
                 .map(|d| Duration::from_secs(*d)),
@@ -335,19 +334,28 @@ mod tests {
     #[test]
     fn cli_protocol_flag_udp() {
         let matches = matches(["rup", "-p", "udp", "127.0.0.1:5000"]);
-        assert_eq!(matches.get_one::<String>("protocol").unwrap(), "udp");
+        assert_eq!(
+            *matches.get_one::<Protocol>("protocol").unwrap(),
+            Protocol::Udp
+        );
     }
 
     #[test]
     fn cli_protocol_flag_tcp() {
         let matches = matches(["rup", "-p", "tcp", "127.0.0.1:5000"]);
-        assert_eq!(matches.get_one::<String>("protocol").unwrap(), "tcp");
+        assert_eq!(
+            *matches.get_one::<Protocol>("protocol").unwrap(),
+            Protocol::Tcp
+        );
     }
 
     #[test]
     fn cli_protocol_flag_icmp() {
         let matches = matches(["rup", "-p", "icmp", "8.8.8.8"]);
-        assert_eq!(matches.get_one::<String>("protocol").unwrap(), "icmp");
+        assert_eq!(
+            *matches.get_one::<Protocol>("protocol").unwrap(),
+            Protocol::Icmp
+        );
     }
 
     #[test]

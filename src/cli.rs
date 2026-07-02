@@ -34,7 +34,7 @@ const CLIENT_ARGS: &[&str] = &[
 fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
-        .version("0.7.0")
+        .version("0.11.0")
         .subcommand_negates_reqs(true)
         .arg_required_else_help(true)
         .arg(

@@ -366,10 +366,12 @@ where
         (SendMode::Interval(config.interval), None)
     };
 
-    let (mut tx_handle, mut rx_handle) = spawn_pinger_tasks(
+    let (sends_done_send, sends_done_recv) = mpsc::channel(1);
+    let (tx_handle, rx_handle) = spawn_pinger_tasks(
         transport,
         channels.transmitter_input,
         channels.transport_to_statista,
+        sends_done_send,
     );
 
     let generator = tokio::spawn(pinger::generator(
@@ -384,34 +386,29 @@ where
     ));
 
     let statista = if let Some(events) = events {
-        tokio::spawn(statistics::statista_with_events(
+        tokio::spawn(statistics::statista_with_events_and_send_done(
             channels.statista_input,
+            sends_done_recv,
             txtr_gen,
             config.wait_time,
             events,
         ))
     } else {
-        tokio::spawn(statistics::statista_report(
+        tokio::spawn(statistics::statista_report_with_send_done(
             channels.statista_input,
+            sends_done_recv,
             txtr_gen,
             config.wait_time,
         ))
     };
 
-    tokio::select! {
-        _ = &mut tx_handle => {
-            rx_handle.abort();
-        }
-        _ = &mut rx_handle => {}
-    }
-
-    drop(tx_handle);
-    drop(rx_handle);
-
     let _ = generator.await;
+    let _ = tx_handle.await;
     let stat_report = statista
         .await
         .map_err(|e| io::Error::other(format!("statista task failed: {e}")))?;
+
+    rx_handle.abort();
 
     Ok(stat_report)
 }
@@ -442,9 +439,14 @@ fn spawn_pinger_tasks<T: Transport + Clone + Send + 'static>(
     transport: T,
     gen_txtr_recv: mpsc::Receiver<pinger::Request>,
     txtr_stat_send: mpsc::Sender<pinger::StatEntry>,
+    sends_done: mpsc::Sender<()>,
 ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
     let t2 = transport.clone();
-    let tx = tokio::spawn(transmitter(t2, gen_txtr_recv, txtr_stat_send.clone()));
+    let txtr_stat_send_for_tx = txtr_stat_send.clone();
+    let tx = tokio::spawn(async move {
+        transmitter(t2, gen_txtr_recv, txtr_stat_send_for_tx).await;
+        let _ = sends_done.send(()).await;
+    });
     let rx = tokio::spawn(receiver(transport, txtr_stat_send));
     (tx, rx)
 }
@@ -469,6 +471,13 @@ mod tests {
         pending: Arc<Mutex<VecDeque<u64>>>,
     }
 
+    #[derive(Clone)]
+    struct DelayedScriptedTransport {
+        replies: Arc<Mutex<VecDeque<u64>>>,
+        pending: Arc<Mutex<VecDeque<u64>>>,
+        delay: Duration,
+    }
+
     impl ScriptedTransport {
         fn new(responses: impl IntoIterator<Item = u64>) -> Self {
             Self {
@@ -483,6 +492,16 @@ mod tests {
             Self {
                 replies: Arc::new(Mutex::new(responses.into_iter().collect())),
                 pending: Arc::new(Mutex::new(VecDeque::new())),
+            }
+        }
+    }
+
+    impl DelayedScriptedTransport {
+        fn new(responses: impl IntoIterator<Item = u64>, delay: Duration) -> Self {
+            Self {
+                replies: Arc::new(Mutex::new(responses.into_iter().collect())),
+                pending: Arc::new(Mutex::new(VecDeque::new())),
+                delay,
             }
         }
     }
@@ -538,6 +557,37 @@ mod tests {
                     });
                 }
                 tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    impl Transport for DelayedScriptedTransport {
+        async fn send(&self, req: &Request) -> io::Result<Instant> {
+            let mut replies = self.replies.lock().await;
+            if replies.front() == Some(&req.id) {
+                replies.pop_front();
+                let pending = self.pending.clone();
+                let delay = self.delay;
+                let id = req.id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    pending.lock().await.push_back(id);
+                });
+            }
+            Ok(Instant::now())
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            loop {
+                if let Some(id) = self.pending.lock().await.pop_front() {
+                    return Ok(Response {
+                        id,
+                        timestamp: Instant::now(),
+                        size: 0,
+                        ttl: None,
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
     }
@@ -873,6 +923,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_ping_with_transport_waits_for_delayed_final_response() {
+        let report = run_ping_with_transport(
+            DelayedScriptedTransport::new([0], Duration::from_millis(10)),
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(1),
+                adaptive: false,
+                wait_time: Duration::from_millis(100),
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(1),
+                run_time: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 1);
+        assert_eq!(report.rtts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_waits_for_final_timeout() {
+        let wait_time = Duration::from_millis(20);
+        let started = Instant::now();
+        let report = run_ping_with_transport(
+            ScriptedTransport::new([]),
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(1),
+                adaptive: false,
+                wait_time,
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(1),
+                run_time: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() >= wait_time);
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 0);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_waits_for_ten_sent_five_received_case() {
+        let wait_time = Duration::from_millis(120);
+        let started = Instant::now();
+        let report = run_ping_with_transport(
+            ScriptedTransport::new(0..5),
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(10),
+                adaptive: false,
+                wait_time,
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(10),
+                run_time: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() >= wait_time);
+        assert_eq!(report.sent, 10);
+        assert_eq!(report.received, 5);
+        assert_eq!(report.loss_pct(), 50.0);
+    }
+
+    #[tokio::test]
     async fn run_ping_with_transport_supports_adaptive_mode() {
         let report = run_ping_with_transport(
             ScriptedTransport::new([0, 1, 2]),
@@ -934,6 +1070,46 @@ mod tests {
             events[1],
             PingEvent::Reply(PingResult { seq: 1, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn ping_session_reports_timeouts_for_ten_sent_five_received_case() {
+        let mut session = start_ping_with_transport(
+            ScriptedTransport::new(0..5),
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(10),
+                adaptive: false,
+                wait_time: Duration::from_millis(120),
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(10),
+                run_time: None,
+            },
+        );
+
+        let mut replies = Vec::new();
+        let mut timeouts = Vec::new();
+        while let Some(event) = session.next().await {
+            match event {
+                PingEvent::Reply(result) => replies.push(result.seq),
+                PingEvent::Timeout { seq } => timeouts.push(seq),
+                PingEvent::ReorderOrLoss { seq } => panic!("unexpected reorder/loss for seq {seq}"),
+            }
+        }
+        replies.sort_unstable();
+        timeouts.sort_unstable();
+
+        let report = session.report().await.unwrap();
+
+        assert_eq!(replies, vec![0, 1, 2, 3, 4]);
+        assert_eq!(timeouts, vec![5, 6, 7, 8, 9]);
+        assert_eq!(report.sent, 10);
+        assert_eq!(report.received, 5);
+        assert_eq!(report.loss_pct(), 50.0);
     }
 
     #[tokio::test]

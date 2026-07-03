@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::{cmp::Ordering, collections::VecDeque};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError};
 use tokio::time::sleep;
 
 use crate::pinger::{Entry, Response, StatEntry};
@@ -122,8 +122,66 @@ fn match_response(requests: &mut VecDeque<Entry>, response: Response) -> Vec<Res
     matches
 }
 
+async fn handle_stat_entry(
+    entry: StatEntry,
+    requests: &mut VecDeque<Entry>,
+    rtts: &mut Vec<Duration>,
+    total_sent: &mut u64,
+    to_generator: &Option<Sender<()>>,
+    sink: &StatSink,
+) {
+    match entry {
+        StatEntry::Open(t) => {
+            *total_sent += 1;
+            requests.push_back(t);
+        }
+        StatEntry::Close(t) => {
+            for response_match in match_response(requests, t) {
+                match response_match {
+                    ResponseMatch::Matched(result) => {
+                        rtts.push(result.rtt);
+                        signal_generator(to_generator).await;
+                        sink.reply(result).await;
+                    }
+                    ResponseMatch::ReorderOrLoss { seq } => {
+                        sink.event(PingEvent::ReorderOrLoss { seq }).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn drain_ready_stat_entries(
+    from_transport: &mut Receiver<StatEntry>,
+    requests: &mut VecDeque<Entry>,
+    rtts: &mut Vec<Duration>,
+    total_sent: &mut u64,
+    to_generator: &Option<Sender<()>>,
+    sink: &StatSink,
+) -> bool {
+    loop {
+        match from_transport.try_recv() {
+            Ok(entry) => {
+                handle_stat_entry(entry, requests, rtts, total_sent, to_generator, sink).await;
+            }
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+async fn recv_send_done(sends_done: &mut Option<Receiver<()>>) {
+    if let Some(receiver) = sends_done.as_mut() {
+        let _ = receiver.recv().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn run_statista_core(
     mut from_transport: Receiver<StatEntry>,
+    mut sends_done: Option<Receiver<()>>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
     sink: StatSink,
@@ -131,37 +189,46 @@ async fn run_statista_core(
     let mut requests = VecDeque::<Entry>::new();
     let mut rtts = Vec::new();
     let mut total_sent = 0u64;
+    let mut input_closed = false;
+    let mut no_more_sends = false;
 
     loop {
+        if (input_closed || no_more_sends) && requests.is_empty() {
+            break;
+        }
+
         let timeout = requests
             .front()
             .map(|req| wait_time.saturating_sub(req.ts.elapsed()))
             .unwrap_or(wait_time);
 
         tokio::select! {
-            resp = from_transport.recv() => {
-                let Some(resp) = resp else { break; };
+            resp = from_transport.recv(), if !input_closed => {
+                let Some(resp) = resp else {
+                    input_closed = true;
+                    continue;
+                };
 
-                match resp {
-                    StatEntry::Open(t) => {
-                        total_sent += 1;
-                        requests.push_back(t);
-                    }
-                    StatEntry::Close(t) => {
-                        for response_match in match_response(&mut requests, t) {
-                            match response_match {
-                                ResponseMatch::Matched(result) => {
-                                    rtts.push(result.rtt);
-                                    signal_generator(&to_generator).await;
-                                    sink.reply(result).await;
-                                }
-                                ResponseMatch::ReorderOrLoss { seq } => {
-                                    sink.event(PingEvent::ReorderOrLoss { seq }).await;
-                                }
-                            }
-                        }
-                    }
-                }
+                handle_stat_entry(
+                    resp,
+                    &mut requests,
+                    &mut rtts,
+                    &mut total_sent,
+                    &to_generator,
+                    &sink,
+                ).await;
+            }
+            _ = recv_send_done(&mut sends_done) => {
+                sends_done = None;
+                no_more_sends = true;
+                input_closed |= drain_ready_stat_entries(
+                    &mut from_transport,
+                    &mut requests,
+                    &mut rtts,
+                    &mut total_sent,
+                    &to_generator,
+                    &sink,
+                ).await;
             }
             _ = sleep(timeout), if !requests.is_empty() => {
                 expire_timed_out(&mut requests, wait_time, &to_generator, &sink).await;
@@ -189,9 +256,33 @@ pub(crate) async fn statista_report(
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
 ) -> crate::PingReport {
-    run_statista_core(from_transport, to_generator, wait_time, StatSink::None).await
+    run_statista_core(
+        from_transport,
+        None,
+        to_generator,
+        wait_time,
+        StatSink::None,
+    )
+    .await
 }
 
+pub(crate) async fn statista_report_with_send_done(
+    from_transport: Receiver<StatEntry>,
+    sends_done: Receiver<()>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+) -> crate::PingReport {
+    run_statista_core(
+        from_transport,
+        Some(sends_done),
+        to_generator,
+        wait_time,
+        StatSink::None,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn statista_with_events(
     from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
@@ -200,6 +291,24 @@ pub(crate) async fn statista_with_events(
 ) -> crate::PingReport {
     run_statista_core(
         from_transport,
+        None,
+        to_generator,
+        wait_time,
+        StatSink::Events(events),
+    )
+    .await
+}
+
+pub(crate) async fn statista_with_events_and_send_done(
+    from_transport: Receiver<StatEntry>,
+    sends_done: Receiver<()>,
+    to_generator: Option<Sender<()>>,
+    wait_time: Duration,
+    events: Sender<PingEvent>,
+) -> crate::PingReport {
+    run_statista_core(
+        from_transport,
+        Some(sends_done),
         to_generator,
         wait_time,
         StatSink::Events(events),
@@ -215,6 +324,7 @@ pub async fn statista_with_collector(
 ) -> crate::PingReport {
     run_statista_core(
         from_transport,
+        None,
         to_generator,
         wait_time,
         StatSink::Collector(collector),

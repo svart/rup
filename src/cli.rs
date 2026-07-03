@@ -34,7 +34,7 @@ const CLIENT_ARGS: &[&str] = &[
 fn cli() -> Command {
     Command::new("rup")
         .about("rup universal pinger")
-        .version("0.11.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .subcommand_negates_reqs(true)
         .arg_required_else_help(true)
         .arg(
@@ -246,6 +246,11 @@ mod tests {
         args: impl IntoIterator<Item = &'static str>,
     ) -> Result<clap::ArgMatches, clap::Error> {
         cli().try_get_matches_from(args)
+    }
+
+    #[test]
+    fn cli_version_matches_package_version() {
+        assert_eq!(cli().get_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

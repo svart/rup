@@ -153,20 +153,16 @@ fn main() {
         .build()
         .expect("failed to build runtime");
 
-    rt.block_on(run_cli(cli_params));
-}
-
-async fn run_cli(cli_params: cli::CliParams) {
-    match cli_params {
-        PingerParams(params) => run_client(params).await,
-        ServerParams(params) => run_server_command(params).await,
-    }
-}
-
-async fn run_server_command(params: cli::ServerParams) {
-    if let Err(e) = rup::run_server(params.protocol, params.local_address).await {
-        eprintln!("{e}");
-    }
+    rt.block_on(async {
+        match cli_params {
+            PingerParams(params) => run_client(params).await,
+            ServerParams(params) => {
+                if let Err(e) = rup::run_server(params.protocol, params.local_address).await {
+                    eprintln!("{e}");
+                }
+            }
+        }
+    });
 }
 
 async fn run_client(params: cli::PingerParams) {

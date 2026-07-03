@@ -248,22 +248,14 @@ pub async fn statista(
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
 ) {
-    let _ = statista_report(from_transport, to_generator, wait_time).await;
-}
-
-pub(crate) async fn statista_report(
-    from_transport: Receiver<StatEntry>,
-    to_generator: Option<Sender<()>>,
-    wait_time: Duration,
-) -> crate::PingReport {
-    run_statista_core(
+    let _ = run_statista_core(
         from_transport,
         None,
         to_generator,
         wait_time,
         StatSink::None,
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn statista_report_with_send_done(

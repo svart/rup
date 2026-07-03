@@ -54,10 +54,6 @@ async fn resolve_remote_target(remote: String, protocol: Protocol) -> io::Result
     })
 }
 
-fn fmt_duration_ms(d: Duration) -> String {
-    format!("{:.3} ms", d.as_secs_f64() * 1000.0)
-}
-
 fn fmt_duration_ms_value(d: Duration) -> String {
     format!("{:.3}", d.as_secs_f64() * 1000.0)
 }
@@ -93,12 +89,12 @@ fn reply_line(ctx: &OutputContext, result: &PingResult) -> String {
         .map(|ttl| format!(" ttl={ttl}"))
         .unwrap_or_default();
     format!(
-        "{} bytes from {}: seq={}{} time={}",
+        "{} bytes from {}: seq={}{} time={} ms",
         result.size,
         ctx.target.address.ip(),
         result.seq,
         ttl,
-        fmt_duration_ms(result.rtt)
+        fmt_duration_ms_value(result.rtt)
     )
 }
 
@@ -128,20 +124,6 @@ fn rtt_line(report: &PingReport) -> Option<String> {
         fmt_duration_ms_value(report.max()?),
         fmt_duration_ms_value(report.std_dev()?),
     ))
-}
-
-fn print_event(ctx: &OutputContext, event: PingEvent) {
-    if let PingEvent::Reply(result) = event {
-        println!("{}", reply_line(ctx, &result));
-    }
-}
-
-fn print_report(ctx: &OutputContext, report: &PingReport, elapsed: Duration) {
-    println!("\n--- {} ping statistics ---", ctx.target.input);
-    println!("{}", packet_loss_line(report, elapsed));
-    if let Some(line) = rtt_line(report) {
-        println!("{line}");
-    }
 }
 
 fn main() {
@@ -199,14 +181,20 @@ async fn run_client(params: cli::PingerParams) {
     match rup::start_ping_session(config).await {
         Ok(mut session) => {
             while let Some(event) = session.next().await {
-                print_event(&ctx, event);
+                if let PingEvent::Reply(result) = event {
+                    println!("{}", reply_line(&ctx, &result));
+                }
             }
 
             match session.report().await {
                 Ok(report) => {
                     let elapsed =
                         display_elapsed(started.elapsed(), &report, DisplayTiming::from(&params));
-                    print_report(&ctx, &report, elapsed);
+                    println!("\n--- {} ping statistics ---", ctx.target.input);
+                    println!("{}", packet_loss_line(&report, elapsed));
+                    if let Some(line) = rtt_line(&report) {
+                        println!("{line}");
+                    }
                 }
                 Err(e) => eprintln!("{e}"),
             }

@@ -61,7 +61,7 @@ pub async fn recv_from_with_tos(
             msg.msg_iov = &mut iov;
             msg.msg_iovlen = 1;
             msg.msg_control = control.as_mut_ptr().cast();
-            msg.msg_controllen = control.len();
+            msg.msg_controllen = control.len() as _;
 
             let n = unsafe { libc::recvmsg(fd, &mut msg, 0) };
             if n < 0 {

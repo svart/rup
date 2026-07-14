@@ -1,6 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::runtime;
 
@@ -132,11 +132,17 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn jsonl_metadata(ctx: &OutputContext, interval: Duration, adaptive: bool) -> String {
+fn jsonl_metadata(
+    ctx: &OutputContext,
+    interval: Duration,
+    adaptive: bool,
+    started_at_ms: u64,
+) -> String {
     serde_json::to_string(&json!({
         "schema": "rup.ping",
-        "version": 1,
+        "version": 2,
         "record": "metadata",
+        "started_at_ms": started_at_ms,
         "target": ctx.target.input,
         "address": ctx.target.address.ip(),
         "protocol": ctx.protocol.as_str(),
@@ -148,10 +154,12 @@ fn jsonl_metadata(ctx: &OutputContext, interval: Duration, adaptive: bool) -> St
     .expect("JSON values serialize")
 }
 
-fn jsonl_event(event: &PingEvent, elapsed: Duration) -> String {
+fn jsonl_event(event: &PingEvent, elapsed: Duration, started_at_ms: u64) -> String {
+    let timestamp_ms = absolute_timestamp_ms(started_at_ms, elapsed);
     let value = match event {
         PingEvent::Reply(result) => json!({
             "record": "reply",
+            "timestamp_ms": timestamp_ms,
             "elapsed_ms": elapsed.as_millis(),
             "seq": result.seq,
             "rtt_ms": duration_ms(result.rtt),
@@ -160,11 +168,13 @@ fn jsonl_event(event: &PingEvent, elapsed: Duration) -> String {
         }),
         PingEvent::Timeout { seq } => json!({
             "record": "timeout",
+            "timestamp_ms": timestamp_ms,
             "elapsed_ms": elapsed.as_millis(),
             "seq": seq,
         }),
         PingEvent::ReorderOrLoss { seq } => json!({
             "record": "reorder_or_loss",
+            "timestamp_ms": timestamp_ms,
             "elapsed_ms": elapsed.as_millis(),
             "seq": seq,
         }),
@@ -172,9 +182,10 @@ fn jsonl_event(event: &PingEvent, elapsed: Duration) -> String {
     serde_json::to_string(&value).expect("JSON values serialize")
 }
 
-fn jsonl_summary(report: &PingReport, elapsed: Duration) -> String {
+fn jsonl_summary(report: &PingReport, elapsed: Duration, started_at_ms: u64) -> String {
     serde_json::to_string(&json!({
         "record": "summary",
+        "timestamp_ms": absolute_timestamp_ms(started_at_ms, elapsed),
         "elapsed_ms": elapsed.as_millis(),
         "sent": report.sent,
         "received": report.received,
@@ -186,6 +197,18 @@ fn jsonl_summary(report: &PingReport, elapsed: Duration) -> String {
         "rtt_std_dev_ms": report.std_dev().map(duration_ms),
     }))
     .expect("JSON values serialize")
+}
+
+fn absolute_timestamp_ms(started_at_ms: u64, elapsed: Duration) -> u64 {
+    started_at_ms.saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn unix_timestamp_ms() -> u64 {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before the Unix epoch")
+        .as_millis();
+    u64::try_from(milliseconds).expect("system time does not fit into milliseconds")
 }
 
 fn main() {
@@ -238,11 +261,15 @@ async fn run_client(params: cli::PingerParams) {
         run_time: params.run_time,
     };
 
+    let started_at_ms = unix_timestamp_ms();
     let started = Instant::now();
     match params.output {
         OutputFormat::Human => println!("{}", header_line(&ctx)),
         OutputFormat::Jsonl => {
-            println!("{}", jsonl_metadata(&ctx, params.interval, params.adaptive))
+            println!(
+                "{}",
+                jsonl_metadata(&ctx, params.interval, params.adaptive, started_at_ms)
+            )
         }
     }
     match rup::start_ping_session(config).await {
@@ -255,7 +282,7 @@ async fn run_client(params: cli::PingerParams) {
                         }
                     }
                     OutputFormat::Jsonl => {
-                        println!("{}", jsonl_event(&event, started.elapsed()));
+                        println!("{}", jsonl_event(&event, started.elapsed(), started_at_ms));
                     }
                 }
             }
@@ -272,7 +299,9 @@ async fn run_client(params: cli::PingerParams) {
                                 println!("{line}");
                             }
                         }
-                        OutputFormat::Jsonl => println!("{}", jsonl_summary(&report, elapsed)),
+                        OutputFormat::Jsonl => {
+                            println!("{}", jsonl_summary(&report, elapsed, started_at_ms))
+                        }
                     }
                 }
                 Err(e) => eprintln!("{e}"),
@@ -309,14 +338,23 @@ mod tests {
         };
 
         let records = [
-            jsonl_metadata(&ctx, Duration::from_millis(100), false),
-            jsonl_event(&PingEvent::Reply(reply), Duration::from_millis(150)),
-            jsonl_event(&PingEvent::Timeout { seq: 8 }, Duration::from_millis(250)),
+            jsonl_metadata(&ctx, Duration::from_millis(100), false, 1_700_000_000_000),
+            jsonl_event(
+                &PingEvent::Reply(reply),
+                Duration::from_millis(150),
+                1_700_000_000_000,
+            ),
+            jsonl_event(
+                &PingEvent::Timeout { seq: 8 },
+                Duration::from_millis(250),
+                1_700_000_000_000,
+            ),
             jsonl_event(
                 &PingEvent::ReorderOrLoss { seq: 9 },
                 Duration::from_millis(300),
+                1_700_000_000_000,
             ),
-            jsonl_summary(&report, Duration::from_millis(350)),
+            jsonl_summary(&report, Duration::from_millis(350), 1_700_000_000_000),
         ];
         let values = records
             .iter()
@@ -324,13 +362,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(values[0]["schema"], "rup.ping");
-        assert_eq!(values[0]["version"], 1);
+        assert_eq!(values[0]["version"], 2);
         assert_eq!(values[0]["record"], "metadata");
+        assert_eq!(values[0]["started_at_ms"], 1_700_000_000_000_u64);
         assert_eq!(values[1]["record"], "reply");
+        assert_eq!(values[1]["timestamp_ms"], 1_700_000_000_150_u64);
         assert_eq!(values[1]["rtt_ms"], 0.042);
         assert_eq!(values[2]["record"], "timeout");
+        assert_eq!(values[2]["timestamp_ms"], 1_700_000_000_250_u64);
         assert_eq!(values[3]["record"], "reorder_or_loss");
         assert_eq!(values[4]["record"], "summary");
+        assert_eq!(values[4]["timestamp_ms"], 1_700_000_000_350_u64);
         assert!((values[4]["loss_percent"].as_f64().unwrap() - 100.0 / 3.0).abs() < 1e-12);
         assert!(records.iter().all(|record| !record.contains('\n')));
     }

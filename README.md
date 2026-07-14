@@ -13,6 +13,9 @@ rup -n 5 8.8.8.8
 rup server 127.0.0.1:5000
 rup -p udp -n 5 127.0.0.1:5000
 
+# Emit versioned JSON Lines for automated processing.
+rup --output jsonl -p udp -n 5 127.0.0.1:5000
+
 # Set outgoing IP TOS / IPv6 traffic class.
 rup -p udp --tos 184 -n 5 127.0.0.1:5000
 

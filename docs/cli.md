@@ -34,6 +34,7 @@ rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 | `--response-size <bytes>` | Response packet size, minimum 12 bytes |
 | `--tos <0-255>` | Outgoing IP TOS / IPv6 traffic class byte |
 | `--local-address <addr>` | Local bind address [default: `0.0.0.0:0`] |
+| `--output <human|jsonl>` | Output format [default: `human`] |
 
 Examples:
 
@@ -84,6 +85,8 @@ rup -p tcp server 0.0.0.0:5000
 
 ## Output
 
+Human-readable output is the default:
+
 ```text
 PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
 12 bytes from 127.0.0.1: seq=0 ttl=64 time=0.053 ms
@@ -93,3 +96,17 @@ PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
 rtt min/avg/max/mdev = 0.052/0.052/0.053/0.001 ms
 ```
+
+Use `--output jsonl` for machine-readable output. The first line is a
+`rup.ping` metadata record with schema version 1. It is followed by `reply`,
+`timeout`, or `reorder_or_loss` event records and one final `summary` record.
+Every record occupies exactly one line; errors remain on stderr so successful
+stdout can be parsed as a JSON Lines stream.
+
+```json
+{"adaptive":false,"address":"127.0.0.1","interval_ms":1000,"packet_size_bytes":40,"protocol":"icmp","record":"metadata","request_size_bytes":12,"schema":"rup.ping","target":"127.0.0.1","version":1}
+{"elapsed_ms":0,"record":"reply","rtt_ms":0.053,"seq":0,"size_bytes":12,"ttl":64}
+{"elapsed_ms":1,"loss_percent":0.0,"received":1,"record":"summary","rtt_max_ms":0.053,"rtt_mean_ms":0.053,"rtt_median_ms":0.053,"rtt_min_ms":0.053,"rtt_std_dev_ms":0.0,"sent":1}
+```
+
+`--output` is a client option and is rejected with the `server` subcommand.

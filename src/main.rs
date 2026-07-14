@@ -7,7 +7,9 @@ use tokio::runtime;
 mod cli;
 
 use cli::CliParams::{PingerParams, ServerParams};
+use cli::OutputFormat;
 use rup::{PING_HDR_LEN, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
+use serde_json::json;
 
 #[derive(Clone, Debug)]
 struct ResolvedTarget {
@@ -126,6 +128,66 @@ fn rtt_line(report: &PingReport) -> Option<String> {
     ))
 }
 
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn jsonl_metadata(ctx: &OutputContext, interval: Duration, adaptive: bool) -> String {
+    serde_json::to_string(&json!({
+        "schema": "rup.ping",
+        "version": 1,
+        "record": "metadata",
+        "target": ctx.target.input,
+        "address": ctx.target.address.ip(),
+        "protocol": ctx.protocol.as_str(),
+        "request_size_bytes": data_size(ctx),
+        "packet_size_bytes": total_packet_size(ctx),
+        "interval_ms": interval.as_millis(),
+        "adaptive": adaptive,
+    }))
+    .expect("JSON values serialize")
+}
+
+fn jsonl_event(event: &PingEvent, elapsed: Duration) -> String {
+    let value = match event {
+        PingEvent::Reply(result) => json!({
+            "record": "reply",
+            "elapsed_ms": elapsed.as_millis(),
+            "seq": result.seq,
+            "rtt_ms": duration_ms(result.rtt),
+            "size_bytes": result.size,
+            "ttl": result.ttl,
+        }),
+        PingEvent::Timeout { seq } => json!({
+            "record": "timeout",
+            "elapsed_ms": elapsed.as_millis(),
+            "seq": seq,
+        }),
+        PingEvent::ReorderOrLoss { seq } => json!({
+            "record": "reorder_or_loss",
+            "elapsed_ms": elapsed.as_millis(),
+            "seq": seq,
+        }),
+    };
+    serde_json::to_string(&value).expect("JSON values serialize")
+}
+
+fn jsonl_summary(report: &PingReport, elapsed: Duration) -> String {
+    serde_json::to_string(&json!({
+        "record": "summary",
+        "elapsed_ms": elapsed.as_millis(),
+        "sent": report.sent,
+        "received": report.received,
+        "loss_percent": report.loss_pct(),
+        "rtt_min_ms": report.min().map(duration_ms),
+        "rtt_mean_ms": report.mean().map(duration_ms),
+        "rtt_median_ms": report.median().map(duration_ms),
+        "rtt_max_ms": report.max().map(duration_ms),
+        "rtt_std_dev_ms": report.std_dev().map(duration_ms),
+    }))
+    .expect("JSON values serialize")
+}
+
 fn main() {
     let cli_params = cli::get_cli_params();
 
@@ -176,13 +238,25 @@ async fn run_client(params: cli::PingerParams) {
         run_time: params.run_time,
     };
 
-    println!("{}", header_line(&ctx));
     let started = Instant::now();
+    match params.output {
+        OutputFormat::Human => println!("{}", header_line(&ctx)),
+        OutputFormat::Jsonl => {
+            println!("{}", jsonl_metadata(&ctx, params.interval, params.adaptive))
+        }
+    }
     match rup::start_ping_session(config).await {
         Ok(mut session) => {
             while let Some(event) = session.next().await {
-                if let PingEvent::Reply(result) = event {
-                    println!("{}", reply_line(&ctx, &result));
+                match params.output {
+                    OutputFormat::Human => {
+                        if let PingEvent::Reply(result) = event {
+                            println!("{}", reply_line(&ctx, &result));
+                        }
+                    }
+                    OutputFormat::Jsonl => {
+                        println!("{}", jsonl_event(&event, started.elapsed()));
+                    }
                 }
             }
 
@@ -190,10 +264,15 @@ async fn run_client(params: cli::PingerParams) {
                 Ok(report) => {
                     let elapsed =
                         display_elapsed(started.elapsed(), &report, DisplayTiming::from(&params));
-                    println!("\n--- {} ping statistics ---", ctx.target.input);
-                    println!("{}", packet_loss_line(&report, elapsed));
-                    if let Some(line) = rtt_line(&report) {
-                        println!("{line}");
+                    match params.output {
+                        OutputFormat::Human => {
+                            println!("\n--- {} ping statistics ---", ctx.target.input);
+                            println!("{}", packet_loss_line(&report, elapsed));
+                            if let Some(line) = rtt_line(&report) {
+                                println!("{line}");
+                            }
+                        }
+                        OutputFormat::Jsonl => println!("{}", jsonl_summary(&report, elapsed)),
                     }
                 }
                 Err(e) => eprintln!("{e}"),
@@ -206,6 +285,55 @@ async fn run_client(params: cli::PingerParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_records_are_valid_and_versioned() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "example.test".to_owned(),
+                address: "192.0.2.1:0".parse().unwrap(),
+            },
+            protocol: Protocol::Icmp,
+            request_size: Some(PacketSize::new(56).unwrap()),
+        };
+        let reply = PingResult {
+            seq: 7,
+            rtt: Duration::from_micros(42),
+            size: 56,
+            ttl: Some(64),
+        };
+        let report = PingReport {
+            rtts: vec![Duration::from_micros(39), Duration::from_micros(42)],
+            sent: 3,
+            received: 2,
+        };
+
+        let records = [
+            jsonl_metadata(&ctx, Duration::from_millis(100), false),
+            jsonl_event(&PingEvent::Reply(reply), Duration::from_millis(150)),
+            jsonl_event(&PingEvent::Timeout { seq: 8 }, Duration::from_millis(250)),
+            jsonl_event(
+                &PingEvent::ReorderOrLoss { seq: 9 },
+                Duration::from_millis(300),
+            ),
+            jsonl_summary(&report, Duration::from_millis(350)),
+        ];
+        let values = records
+            .iter()
+            .map(|record| serde_json::from_str::<serde_json::Value>(record).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values[0]["schema"], "rup.ping");
+        assert_eq!(values[0]["version"], 1);
+        assert_eq!(values[0]["record"], "metadata");
+        assert_eq!(values[1]["record"], "reply");
+        assert_eq!(values[1]["rtt_ms"], 0.042);
+        assert_eq!(values[2]["record"], "timeout");
+        assert_eq!(values[3]["record"], "reorder_or_loss");
+        assert_eq!(values[4]["record"], "summary");
+        assert!((values[4]["loss_percent"].as_f64().unwrap() - 100.0 / 3.0).abs() < 1e-12);
+        assert!(records.iter().all(|record| !record.contains('\n')));
+    }
 
     #[test]
     fn header_line_matches_ping_shape() {

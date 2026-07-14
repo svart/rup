@@ -19,7 +19,8 @@ generator --Request--> transmitter --StatEntry::Open--> statista --PingEvent--> 
 4. `statista` matches open and close entries by ID, computes RTTs, tracks
    timeouts, and emits structured `PingEvent` values for live sessions.
 5. Callers consume `PingSession::next()` and decide how to present or process
-   events. Completed sessions return a `PingReport`.
+   events. The CLI can render the same event stream as human-readable text or
+   versioned JSON Lines. Completed sessions return a `PingReport`.
 
 Fixed interval mode sleeps between generated requests. Adaptive mode waits for
 `statista` to signal after either a response or timeout.

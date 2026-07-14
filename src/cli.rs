@@ -16,6 +16,7 @@ const ARG_TOS: &str = "tos";
 const ARG_PING_NUMBER: &str = "ping-number";
 const ARG_RUN_TIME: &str = "run-time";
 const ARG_PROTOCOL: &str = "protocol";
+const ARG_OUTPUT: &str = "output";
 const CMD_SERVER: &str = "server";
 
 const CLIENT_ARGS: &[&str] = &[
@@ -29,7 +30,15 @@ const CLIENT_ARGS: &[&str] = &[
     ARG_TOS,
     ARG_PING_NUMBER,
     ARG_RUN_TIME,
+    ARG_OUTPUT,
 ];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum OutputFormat {
+    #[default]
+    Human,
+    Jsonl,
+}
 
 fn cli() -> Command {
     Command::new("rup")
@@ -115,6 +124,14 @@ fn cli() -> Command {
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
+        .arg(
+            Arg::new(ARG_OUTPUT)
+                .long("output")
+                .help("Select human-readable or JSON Lines client output")
+                .action(ArgAction::Set)
+                .value_parser(["human", "jsonl"])
+                .default_value("human"),
+        )
         .subcommand(
             Command::new(CMD_SERVER)
                 .about("Receive requests and send them back immediately")
@@ -159,6 +176,7 @@ pub(crate) struct PingerParams {
     pub ping_number: Option<u64>,
     pub protocol: Protocol,
     pub run_time: Option<Duration>,
+    pub output: OutputFormat,
 }
 
 pub(crate) enum CliParams {
@@ -219,6 +237,11 @@ where
             run_time: matches
                 .get_one::<u64>(ARG_RUN_TIME)
                 .map(|d| Duration::from_secs(*d)),
+            output: match matches.get_one::<String>(ARG_OUTPUT).map(String::as_str) {
+                Some("jsonl") => OutputFormat::Jsonl,
+                Some("human") => OutputFormat::Human,
+                _ => unreachable!("clap validates output formats"),
+            },
         }),
         _ => unreachable!("clap validates subcommands"),
     })
@@ -306,6 +329,37 @@ mod tests {
         assert_eq!(*matches.get_one::<u8>("tos").unwrap(), 184);
         assert_eq!(*matches.get_one::<u64>("ping-number").unwrap(), 10);
         assert_eq!(*matches.get_one::<u64>("run-time").unwrap(), 30);
+    }
+
+    #[test]
+    fn cli_client_accepts_jsonl_output() {
+        let params = get_cli_params_from(["rup", "--output", "jsonl", "8.8.8.8"]).unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert_eq!(params.output, OutputFormat::Jsonl);
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn cli_client_output_defaults_to_human() {
+        let params = get_cli_params_from(["rup", "8.8.8.8"]).unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert_eq!(params.output, OutputFormat::Human);
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn cli_server_rejects_output_format() {
+        assert!(
+            get_cli_params_from(["rup", "--output", "jsonl", "server", "127.0.0.1:5000",]).is_err()
+        );
     }
 
     #[test]

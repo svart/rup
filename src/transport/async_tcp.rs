@@ -18,6 +18,7 @@ use crate::tos as traffic;
 use crate::transport::Transport;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const PROBE_RESPONSE_CHANNEL_CAP: usize = 1024;
 
 enum TcpServerReadError {
     Closed,
@@ -156,8 +157,8 @@ struct AutoTcpTransport {
     wait_time: Duration,
     mode: Mutex<AutoTcpMode>,
     mode_changed: Notify,
-    responses_send: mpsc::UnboundedSender<Response>,
-    responses_recv: Mutex<mpsc::UnboundedReceiver<Response>>,
+    responses_send: mpsc::Sender<Response>,
+    responses_recv: Mutex<mpsc::Receiver<Response>>,
 }
 
 enum TcpClientKind {
@@ -217,7 +218,7 @@ impl TcpClientTransport {
         wait_time: Duration,
     ) -> io::Result<Self> {
         let initial_socket = configured_tcp_socket(local, remote, tos)?;
-        let (responses_send, responses_recv) = mpsc::unbounded_channel();
+        let (responses_send, responses_recv) = mpsc::channel(PROBE_RESPONSE_CHANNEL_CAP);
         Ok(Self {
             kind: Arc::new(TcpClientKind::Auto(Box::new(AutoTcpTransport {
                 local,
@@ -328,7 +329,7 @@ async fn send_auto_request(transport: &AutoTcpTransport, req: &Request) -> io::R
                 Ok(Err(_)) => {
                     *mode = AutoTcpMode::Probe;
                     transport.mode_changed.notify_waiters();
-                    queue_connect_response(transport, req.id)?;
+                    queue_connect_response(transport, req.id).await?;
                     Ok(started)
                 }
                 Err(_) => {
@@ -348,12 +349,12 @@ async fn send_connect_probe(transport: &AutoTcpTransport, id: u64) -> io::Result
         .await
         .is_ok()
     {
-        queue_connect_response(transport, id)?;
+        queue_connect_response(transport, id).await?;
     }
     Ok(started)
 }
 
-fn queue_connect_response(transport: &AutoTcpTransport, id: u64) -> io::Result<()> {
+async fn queue_connect_response(transport: &AutoTcpTransport, id: u64) -> io::Result<()> {
     transport
         .responses_send
         .send(Response {
@@ -362,6 +363,7 @@ fn queue_connect_response(transport: &AutoTcpTransport, id: u64) -> io::Result<(
             size: 0,
             ttl: None,
         })
+        .await
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP probe receiver closed"))
 }
 

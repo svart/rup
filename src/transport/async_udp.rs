@@ -17,6 +17,9 @@ use crate::tos as traffic;
 use crate::transport::Transport;
 
 #[cfg(target_os = "linux")]
+const ERROR_RESPONSE_CHANNEL_CAP: usize = 1024;
+
+#[cfg(target_os = "linux")]
 fn response_from_error_payload(payload: &[u8], origin: u8) -> Option<Response> {
     if !matches!(origin, libc::SO_EE_ORIGIN_ICMP | libc::SO_EE_ORIGIN_ICMP6) {
         return None;
@@ -73,7 +76,7 @@ fn recv_socket_error(socket: &UdpSocket, payload: &mut [u8]) -> io::Result<Optio
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = control.len();
+    msg.msg_controllen = control.len() as _;
 
     let n = unsafe {
         libc::recvmsg(
@@ -212,9 +215,9 @@ fn bind_server_socket(local_address: SocketAddr) -> io::Result<UdpSocket> {
 pub struct UdpClientTransport {
     socket: Arc<UdpSocket>,
     #[cfg(target_os = "linux")]
-    queued_errors_send: mpsc::UnboundedSender<Response>,
+    queued_errors_send: mpsc::Sender<Response>,
     #[cfg(target_os = "linux")]
-    queued_errors_recv: Arc<Mutex<mpsc::UnboundedReceiver<Response>>>,
+    queued_errors_recv: Arc<Mutex<mpsc::Receiver<Response>>>,
 }
 
 impl UdpClientTransport {
@@ -260,7 +263,7 @@ impl UdpClientTransport {
         })?;
 
         #[cfg(target_os = "linux")]
-        let (queued_errors_send, queued_errors_recv) = mpsc::unbounded_channel();
+        let (queued_errors_send, queued_errors_recv) = mpsc::channel(ERROR_RESPONSE_CHANNEL_CAP);
 
         Ok(UdpClientTransport {
             socket: Arc::new(socket),
@@ -281,10 +284,10 @@ impl Transport for UdpClientTransport {
                 Ok(_) => return Ok(timestamp),
                 #[cfg(target_os = "linux")]
                 Err(send_error) => {
-                    let mut payload = vec![0; u16::MAX as usize];
+                    let mut payload = [0; PING_HDR_LEN];
                     match recv_socket_error(&self.socket, &mut payload) {
                         Ok(Some(response)) => {
-                            self.queued_errors_send.send(response).map_err(|_| {
+                            self.queued_errors_send.send(response).await.map_err(|_| {
                                 io::Error::new(
                                     io::ErrorKind::BrokenPipe,
                                     "UDP error response receiver closed",
@@ -374,11 +377,12 @@ mod tests {
             response_size: None,
         });
 
-        let response = response_from_error_payload(&payload, libc::SO_EE_ORIGIN_ICMP).unwrap();
-
-        assert_eq!(response.id, 42);
-        assert_eq!(response.size, 0);
-        assert_eq!(response.ttl, None);
+        for origin in [libc::SO_EE_ORIGIN_ICMP, libc::SO_EE_ORIGIN_ICMP6] {
+            let response = response_from_error_payload(&payload, origin).unwrap();
+            assert_eq!(response.id, 42);
+            assert_eq!(response.size, 0);
+            assert_eq!(response.ttl, None);
+        }
     }
 
     #[test]

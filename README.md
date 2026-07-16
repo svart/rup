@@ -33,6 +33,9 @@ Terminal network responses are included in received packets and RTT statistics.
 Human output labels them as terminal responses; JSONL uses `terminal_reply`
 records with a payload size of zero.
 
+Press Ctrl+C during a client session to stop sending new requests and print the
+final packet-loss and RTT summary.
+
 `--tos <0-255>` sets the full outgoing TOS / traffic class byte for client
 packets. UDP servers reflect the received byte on echo responses when the
 platform exposes it.

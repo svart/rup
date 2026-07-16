@@ -25,6 +25,12 @@ generator --Request--> transmitter --StatEntry::Open--> statista --PingEvent--> 
 Fixed interval mode sleeps between generated requests. Adaptive mode waits for
 `statista` to signal after either a response or timeout.
 
+Live sessions own an explicit stop channel. The CLI translates Ctrl+C into a
+session stop; the generator closes, the transmitter drains requests already
+queued, and statista settles outstanding replies/timeouts before returning the
+summary. Signal handling therefore remains outside reusable transport and
+generator building blocks.
+
 ## Transport Trait
 
 Transport implementations provide the network-specific work:

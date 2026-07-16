@@ -93,6 +93,11 @@ generator ──Request──> transmitter ──StatEntry::Open──> statista
    live RTT lines, losses, timeouts, and final statistics
    with packet loss percentage.
 
+`PingSession::stop()` closes request generation without discarding pending
+results. The CLI maps Ctrl+C to this explicit session cancellation and continues
+through normal report generation; library building blocks do not install
+process-global signal handlers.
+
 For Linux UDP, a matching remote ICMP error is delivered as a zero-size
 `Response`. High-level TCP selects persistent rup echo when sequence zero
 connects successfully; otherwise it measures one TCP connect outcome per

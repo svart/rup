@@ -103,6 +103,11 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+Call `PingSession::stop()` to stop generating new requests while allowing
+already-sent requests to reply or time out. Continue consuming events until
+`next()` returns `None`, then call `report()`. Calling `report()` also requests
+a stop, so an unbounded session does not need a separate cancellation task.
+
 `PingConfig::tos` is the full TOS / traffic class byte. UDP servers reflect the
 received byte on echo responses when available from the operating system.
 

@@ -19,7 +19,7 @@ pub use transport::{Transport, receiver, transmitter};
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 const CHANNEL_CAP: usize = 1024;
@@ -148,13 +148,19 @@ impl PingReport {
 pub struct PingSession {
     events: mpsc::Receiver<PingEvent>,
     report: Option<JoinHandle<io::Result<PingReport>>>,
+    stop: Option<oneshot::Sender<()>>,
 }
 
 impl PingSession {
-    fn new(events: mpsc::Receiver<PingEvent>, report: JoinHandle<io::Result<PingReport>>) -> Self {
+    fn new(
+        events: mpsc::Receiver<PingEvent>,
+        report: JoinHandle<io::Result<PingReport>>,
+        stop: oneshot::Sender<()>,
+    ) -> Self {
         Self {
             events,
             report: Some(report),
+            stop: Some(stop),
         }
     }
 
@@ -162,7 +168,15 @@ impl PingSession {
         self.events.recv().await
     }
 
+    /// Stops generation of new requests while allowing pending results to settle.
+    pub fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+
     pub async fn report(mut self) -> io::Result<PingReport> {
+        self.stop();
         self.events.close();
         let report = self
             .report
@@ -285,14 +299,15 @@ impl PingConfig {
 }
 
 pub async fn run_ping_session(config: PingConfig) -> io::Result<PingReport> {
-    let report = spawn_ping_session(config, None).await?;
+    let report = spawn_ping_session(config, None, None).await?;
     wait_ping_report(report).await
 }
 
 pub async fn start_ping_session(config: PingConfig) -> io::Result<PingSession> {
     let (events_send, events_recv) = mpsc::channel(CHANNEL_CAP);
-    let report = spawn_ping_session(config, Some(events_send)).await?;
-    Ok(PingSession::new(events_recv, report))
+    let (stop_send, stop_recv) = oneshot::channel();
+    let report = spawn_ping_session(config, Some(events_send), Some(stop_recv)).await?;
+    Ok(PingSession::new(events_recv, report, stop_send))
 }
 
 async fn wait_ping_report(report: JoinHandle<io::Result<PingReport>>) -> io::Result<PingReport> {
@@ -304,6 +319,7 @@ async fn wait_ping_report(report: JoinHandle<io::Result<PingReport>>) -> io::Res
 async fn spawn_ping_session(
     config: PingConfig,
     events: Option<mpsc::Sender<PingEvent>>,
+    stop: Option<oneshot::Receiver<()>>,
 ) -> io::Result<JoinHandle<io::Result<PingReport>>> {
     let remote_addr = config.remote;
 
@@ -311,7 +327,7 @@ async fn spawn_ping_session(
         Protocol::Udp => {
             let transport =
                 UdpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
-            Ok(spawn_ping_with_transport(transport, config, events))
+            Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
         Protocol::Tcp => {
             let transport = TcpClientTransport::connect_or_probe(
@@ -321,12 +337,12 @@ async fn spawn_ping_session(
                 config.wait_time,
             )
             .await?;
-            Ok(spawn_ping_with_transport(transport, config, events))
+            Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
         Protocol::Icmp => {
             let transport =
                 IcmpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
-            Ok(spawn_ping_with_transport(transport, config, events))
+            Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
     }
 }
@@ -335,11 +351,14 @@ fn spawn_ping_with_transport<T>(
     transport: T,
     config: PingConfig,
     events: Option<mpsc::Sender<PingEvent>>,
+    stop: Option<oneshot::Receiver<()>>,
 ) -> JoinHandle<io::Result<PingReport>>
 where
     T: Transport + Clone + Send + 'static,
 {
-    tokio::spawn(run_ping_with_transport(transport, config, events))
+    tokio::spawn(run_ping_with_transport_until_stop(
+        transport, config, events, stop,
+    ))
 }
 
 #[cfg(test)]
@@ -348,16 +367,31 @@ where
     T: Transport + Clone + Send + 'static,
 {
     let (events_send, events_recv) = mpsc::channel(CHANNEL_CAP);
+    let (stop_send, stop_recv) = oneshot::channel();
     PingSession::new(
         events_recv,
-        spawn_ping_with_transport(transport, config, Some(events_send)),
+        spawn_ping_with_transport(transport, config, Some(events_send), Some(stop_recv)),
+        stop_send,
     )
 }
 
+#[cfg(test)]
 async fn run_ping_with_transport<T>(
     transport: T,
     config: PingConfig,
     events: Option<mpsc::Sender<PingEvent>>,
+) -> io::Result<PingReport>
+where
+    T: Transport + Clone + Send + 'static,
+{
+    run_ping_with_transport_until_stop(transport, config, events, None).await
+}
+
+async fn run_ping_with_transport_until_stop<T>(
+    transport: T,
+    config: PingConfig,
+    events: Option<mpsc::Sender<PingEvent>>,
+    stop: Option<oneshot::Receiver<()>>,
 ) -> io::Result<PingReport>
 where
     T: Transport + Clone + Send + 'static,
@@ -379,16 +413,24 @@ where
         sends_done_send,
     );
 
-    let generator = tokio::spawn(pinger::generator(
-        channels.generator_to_transmitter,
-        pinger::GeneratorConfig {
-            send_mode,
-            ping_number: config.ping_number,
-            run_time: config.run_time,
-            request_size: config.request_size,
-            response_size: config.response_size,
-        },
-    ));
+    let generator_config = pinger::GeneratorConfig {
+        send_mode,
+        ping_number: config.ping_number,
+        run_time: config.run_time,
+        request_size: config.request_size,
+        response_size: config.response_size,
+    };
+    let generator = tokio::spawn(async move {
+        let run = pinger::generator(channels.generator_to_transmitter, generator_config);
+        if let Some(stop) = stop {
+            tokio::select! {
+                _ = run => {}
+                _ = stop => {}
+            }
+        } else {
+            run.await;
+        }
+    });
 
     let statista = if let Some(events) = events {
         tokio::spawn(statistics::statista_with_events_and_send_done(
@@ -1134,6 +1176,43 @@ mod tests {
             events[1],
             PingEvent::Reply(PingResult { seq: 1, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn ping_session_stop_finishes_unbounded_session_with_report() {
+        let mut session = start_ping_with_transport(
+            ScriptedTransport::new([0]),
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_secs(1),
+                adaptive: false,
+                wait_time: Duration::from_millis(100),
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: None,
+                run_time: None,
+            },
+        );
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), session.next())
+                .await
+                .unwrap(),
+            Some(PingEvent::Reply(PingResult { seq: 0, .. }))
+        ));
+
+        session.stop();
+        while session.next().await.is_some() {}
+        let report = tokio::time::timeout(Duration::from_millis(200), session.report())
+            .await
+            .expect("stopped session should finish")
+            .unwrap();
+
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 1);
     }
 
     #[tokio::test]

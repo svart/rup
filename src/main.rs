@@ -279,7 +279,27 @@ async fn run_client(params: cli::PingerParams) {
     }
     match rup::start_ping_session(config).await {
         Ok(mut session) => {
-            while let Some(event) = session.next().await {
+            let mut interrupted = false;
+            loop {
+                let event = if interrupted {
+                    session.next().await
+                } else {
+                    tokio::select! {
+                        event = session.next() => event,
+                        signal = tokio::signal::ctrl_c() => {
+                            if let Err(e) = signal {
+                                eprintln!("failed to listen for Ctrl+C: {e}");
+                            }
+                            session.stop();
+                            interrupted = true;
+                            continue;
+                        }
+                    }
+                };
+                let Some(event) = event else {
+                    break;
+                };
+
                 match params.output {
                     OutputFormat::Human => {
                         if let PingEvent::Reply(result) = event {

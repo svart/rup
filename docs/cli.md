@@ -55,6 +55,9 @@ rup -p udp --tos 184 127.0.0.1:5000
 rup -i 50 -t 5 8.8.8.8
 ```
 
+Ctrl+C stops generation of new requests, allows already-sent requests to reply
+or time out, and then emits the normal human or JSONL summary.
+
 ## Server
 
 ```sh

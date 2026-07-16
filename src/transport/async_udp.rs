@@ -7,12 +7,111 @@ use std::time::Instant;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
+#[cfg(target_os = "linux")]
+use tokio::sync::{Mutex, mpsc};
 
 use crate::TrafficClass;
 use crate::echo_codec;
 use crate::pinger::{Echo, PING_HDR_LEN, Request, Response};
 use crate::tos as traffic;
 use crate::transport::Transport;
+
+#[cfg(target_os = "linux")]
+fn response_from_error_payload(payload: &[u8], origin: u8) -> Option<Response> {
+    if !matches!(origin, libc::SO_EE_ORIGIN_ICMP | libc::SO_EE_ORIGIN_ICMP6) {
+        return None;
+    }
+
+    let echo = echo_codec::decode_header(payload).ok()?;
+    Some(Response {
+        id: echo.id,
+        timestamp: Instant::now(),
+        size: 0,
+        ttl: None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn enable_socket_recv_errors(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let enabled: libc::c_int = 1;
+    let (level, option) = if remote.is_ipv4() {
+        (libc::IPPROTO_IP, libc::IP_RECVERR)
+    } else {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVERR)
+    };
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            option,
+            (&enabled as *const libc::c_int).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recv_socket_error(socket: &UdpSocket, payload: &mut [u8]) -> io::Result<Option<Response>> {
+    use std::os::fd::AsRawFd;
+
+    let mut control = [0u8; 128];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = control.len();
+
+    let n = unsafe {
+        libc::recvmsg(
+            socket.as_raw_fd(),
+            &mut msg,
+            libc::MSG_ERRQUEUE | libc::MSG_DONTWAIT,
+        )
+    };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let origin = unsafe { extended_error_origin(&msg) };
+    Ok(origin.and_then(|origin| response_from_error_payload(&payload[..n as usize], origin)))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn extended_error_origin(msg: &libc::msghdr) -> Option<u8> {
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
+    while !cmsg.is_null() {
+        let level = unsafe { (*cmsg).cmsg_level };
+        let kind = unsafe { (*cmsg).cmsg_type };
+        if (level == libc::IPPROTO_IP && kind == libc::IP_RECVERR)
+            || (level == libc::IPPROTO_IPV6 && kind == libc::IPV6_RECVERR)
+        {
+            let data_len = unsafe { (*cmsg).cmsg_len as usize }
+                .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
+            if data_len >= std::mem::size_of::<libc::sock_extended_err>() {
+                let error = unsafe {
+                    std::ptr::read_unaligned(
+                        libc::CMSG_DATA(cmsg).cast::<libc::sock_extended_err>(),
+                    )
+                };
+                return Some(error.ee_origin);
+            }
+        }
+        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+    }
+    None
+}
 
 pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
     server_transport_until(local_address, async {
@@ -110,6 +209,10 @@ fn bind_server_socket(local_address: SocketAddr) -> io::Result<UdpSocket> {
 #[derive(Clone)]
 pub struct UdpClientTransport {
     socket: Arc<UdpSocket>,
+    #[cfg(target_os = "linux")]
+    queued_errors_send: mpsc::UnboundedSender<Response>,
+    #[cfg(target_os = "linux")]
+    queued_errors_recv: Arc<Mutex<mpsc::UnboundedReceiver<Response>>>,
 }
 
 impl UdpClientTransport {
@@ -138,6 +241,13 @@ impl UdpClientTransport {
                 )
             })?;
         }
+        #[cfg(target_os = "linux")]
+        enable_socket_recv_errors(&sock, remote).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("enable extended socket errors for {remote} failed: {e}"),
+            )
+        })?;
         sock.set_nonblocking(true)?;
 
         let std_sock: std::net::UdpSocket = sock.into();
@@ -147,8 +257,15 @@ impl UdpClientTransport {
             io::Error::new(e.kind(), format!("client connect to {remote} failed: {e}"))
         })?;
 
+        #[cfg(target_os = "linux")]
+        let (queued_errors_send, queued_errors_recv) = mpsc::unbounded_channel();
+
         Ok(UdpClientTransport {
             socket: Arc::new(socket),
+            #[cfg(target_os = "linux")]
+            queued_errors_send,
+            #[cfg(target_os = "linux")]
+            queued_errors_recv: Arc::new(Mutex::new(queued_errors_recv)),
         })
     }
 }
@@ -156,15 +273,85 @@ impl UdpClientTransport {
 impl Transport for UdpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
         let send_buf = echo_codec::encode_request(req);
-        let timestamp = Instant::now();
-        self.socket.send(&send_buf).await?;
-        Ok(timestamp)
+        loop {
+            let timestamp = Instant::now();
+            match self.socket.send(&send_buf).await {
+                Ok(_) => return Ok(timestamp),
+                #[cfg(target_os = "linux")]
+                Err(send_error) => {
+                    let mut payload = vec![0; u16::MAX as usize];
+                    match recv_socket_error(&self.socket, &mut payload) {
+                        Ok(Some(response)) => {
+                            self.queued_errors_send.send(response).map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::BrokenPipe,
+                                    "UDP error response receiver closed",
+                                )
+                            })?;
+                        }
+                        Ok(None) => return Err(send_error),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(send_error),
+                        Err(e) => return Err(e),
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                Err(send_error) => return Err(send_error),
+            }
+        }
     }
 
     async fn recv(&self) -> io::Result<Response> {
         let mut buf = vec![0; u16::MAX as usize];
-        let n = self.socket.recv(&mut buf).await?;
-        echo_codec::decode_response(&buf[..n])
+
+        #[cfg(target_os = "linux")]
+        loop {
+            use tokio::io::Interest;
+
+            let queued_response = async {
+                self.queued_errors_recv
+                    .lock()
+                    .await
+                    .recv()
+                    .await
+                    .expect("UDP transport retains error response sender")
+            };
+            tokio::select! {
+                response = queued_response => return Ok(response),
+                ready = self.socket.ready(Interest::READABLE | Interest::ERROR) => {
+                    let ready = ready?;
+                    if ready.is_error() {
+                        match self.socket.try_io(Interest::ERROR, || {
+                            recv_socket_error(&self.socket, &mut buf)
+                        }) {
+                            Ok(Some(response)) => return Ok(response),
+                            Ok(None) => continue,
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if ready.is_readable() {
+                        match self.socket.try_recv(&mut buf) {
+                            Ok(n) => return echo_codec::decode_response(&buf[..n]),
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(recv_error) => match recv_socket_error(&self.socket, &mut buf) {
+                                Ok(Some(response)) => return Ok(response),
+                                Ok(None) => return Err(recv_error),
+                                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    return Err(recv_error);
+                                }
+                                Err(e) => return Err(e),
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let n = self.socket.recv(&mut buf).await?;
+            echo_codec::decode_response(&buf[..n])
+        }
     }
 }
 
@@ -173,6 +360,38 @@ mod tests {
     use super::*;
     use crate::PacketSize;
     use crate::pinger::Request;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn remote_icmp_error_payload_becomes_zero_size_response() {
+        let payload = echo_codec::encode_request(&Request {
+            id: 42,
+            request_size: Some(PacketSize::new(64).unwrap()),
+            response_size: None,
+        });
+
+        let response = response_from_error_payload(&payload, libc::SO_EE_ORIGIN_ICMP).unwrap();
+
+        assert_eq!(response.id, 42);
+        assert_eq!(response.size, 0);
+        assert_eq!(response.ttl, None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn local_and_malformed_error_payloads_are_ignored() {
+        let payload = echo_codec::encode_request(&Request {
+            id: 7,
+            request_size: None,
+            response_size: None,
+        });
+
+        assert!(response_from_error_payload(&payload, libc::SO_EE_ORIGIN_LOCAL).is_none());
+        assert!(
+            response_from_error_payload(&payload[..PING_HDR_LEN - 1], libc::SO_EE_ORIGIN_ICMP)
+                .is_none()
+        );
+    }
 
     #[test]
     fn encode_request_default_size() {

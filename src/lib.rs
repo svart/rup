@@ -794,6 +794,36 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn run_ping_session_udp_closed_port_uses_icmp_error() {
+        use tokio::net::UdpSocket;
+
+        let unused_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let unused_addr = unused_socket.local_addr().unwrap();
+        drop(unused_socket);
+
+        let report = run_ping_session(PingConfig {
+            remote: unused_addr,
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol: Protocol::Udp,
+            interval: Duration::from_millis(1),
+            adaptive: false,
+            wait_time: Duration::from_millis(100),
+            request_size: None,
+            response_size: None,
+            tos: None,
+            ping_number: Some(1),
+            run_time: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.received, 1);
+        assert_eq!(report.loss_pct(), 0.0);
+    }
+
+    #[tokio::test]
     async fn run_ping_session_tcp_loopback_report() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;

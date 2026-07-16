@@ -39,11 +39,26 @@ pub trait Transport: Send + Sync {
 Transport values are cloned into transmitter and receiver tasks. Existing
 implementations use `Arc` internally where sharing is needed.
 
+Because terminal connect results can be available before the transmitter has
+forwarded its send timestamp, statista buffers early close entries until the
+matching open entry arrives.
+
 ## Protocols
 
-UDP and TCP use a `rup` echo server. The server reads the shared `Echo` payload,
-swaps `resp_size` into `len`, clears `resp_size`, and sends a padded response of
-the requested size.
+UDP and TCP prefer a `rup` echo server. The server reads the shared `Echo`
+payload, swaps `resp_size` into `len`, clears `resp_size`, and sends a padded
+response of the requested size.
+
+On Linux, UDP also enables `IP_RECVERR` or `IPV6_RECVERR`. The receiver drains
+`MSG_ERRQUEUE`, verifies that an error originated from remote ICMP, and decodes
+the original UDP payload supplied by the kernel to recover the sequence ID.
+This makes an ICMP error a zero-size response without requiring a raw socket.
+
+High-level TCP sessions defer their first connection until sequence zero. A
+successful connection selects the persistent application-echo path. A completed
+connection error selects connect-probe mode, where every later request creates
+a bounded connection attempt and treats either success or a completed error as
+a zero-size response. A connect timeout produces no response.
 
 Client sessions can set a full IP TOS / IPv6 traffic class byte. UDP servers
 receive packet TOS/TCLASS metadata with `recvmsg` where the platform supports

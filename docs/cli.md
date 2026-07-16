@@ -42,7 +42,7 @@ Examples:
 # ICMP is the default client protocol. Port is not required.
 rup -n 10 google.com
 
-# Adaptive mode, 10 pings over UDP.
+# Adaptive mode, 10 pings over UDP. A Linux ICMP error also advances the mode.
 rup -p udp -A -n 10 127.0.0.1:5000
 
 # TCP with a custom request size.
@@ -61,8 +61,16 @@ rup -i 50 -t 5 8.8.8.8
 rup [OPTIONS] server <local-address>
 ```
 
-UDP and TCP use a `rup` echo server. ICMP does not: the remote kernel responds
-to echo requests directly.
+UDP and TCP use a `rup` echo server when one is available. On Linux, UDP also
+measures matching remote ICMP errors such as port-unreachable responses. TCP
+uses application echo if its first connection succeeds; if that connection
+returns an error, it measures a fresh TCP connect outcome for every request.
+This includes SYN-ACK, RST, and ICMP-derived connection errors. A connection or
+datagram with no terminal response still times out normally.
+
+An open TCP service that does not speak the rup echo protocol is treated as an
+echo server and can therefore time out after accepting the connection. ICMP
+mode does not use a server: the remote kernel responds to echo requests.
 
 For UDP, the server reflects the received TOS / traffic class byte on echo
 responses when the operating system supplies that packet metadata. TCP and ICMP
@@ -102,6 +110,10 @@ Use `--output jsonl` for machine-readable output. The first line is a
 `timeout`, or `reorder_or_loss` event records and one final `summary` record.
 Every record occupies exactly one line; errors remain on stderr so successful
 stdout can be parsed as a JSON Lines stream.
+
+Terminal UDP/TCP responses use the existing `reply` record with
+`size_bytes: 0` and `ttl: null`; they count toward `received` and RTT summary
+statistics.
 
 ```json
 {"adaptive":false,"address":"127.0.0.1","interval_ms":1000,"packet_size_bytes":40,"protocol":"icmp","record":"metadata","request_size_bytes":12,"schema":"rup.ping","target":"127.0.0.1","version":1}

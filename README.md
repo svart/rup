@@ -9,7 +9,8 @@ a Rust library.
 # ICMP is the default client protocol and does not need a rup server.
 rup -n 5 8.8.8.8
 
-# UDP needs a rup echo server.
+# UDP uses a rup echo server when available. On Linux, a matching ICMP error
+# (for example, port unreachable) is also measured as a reply.
 rup server 127.0.0.1:5000
 rup -p udp -n 5 127.0.0.1:5000
 
@@ -19,13 +20,17 @@ rup --output jsonl -p udp -n 5 127.0.0.1:5000
 # Set outgoing IP TOS / IPv6 traffic class.
 rup -p udp --tos 184 -n 5 127.0.0.1:5000
 
-# TCP uses the same command shape. -p is a root option.
+# TCP uses rup echo when the first connection succeeds. Otherwise it measures
+# each TCP connect outcome (including RST and ICMP-derived errors).
 rup -p tcp server 127.0.0.1:5000
 rup -p tcp -n 5 127.0.0.1:5000
 ```
 
 UDP/TCP addresses require `host:port`. ICMP accepts `host` or `host:port`; the
 port is ignored.
+
+Terminal network responses are included in received packets and RTT statistics.
+They are reported through the same reply records with a payload size of zero.
 
 `--tos <0-255>` sets the full outgoing TOS / traffic class byte for client
 packets. UDP servers reflect the received byte on echo responses when the

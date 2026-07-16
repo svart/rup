@@ -93,6 +93,12 @@ generator ──Request──> transmitter ──StatEntry::Open──> statista
    live RTT lines, losses, timeouts, and final statistics
    with packet loss percentage.
 
+For Linux UDP, a matching remote ICMP error is delivered as a zero-size
+`Response`. High-level TCP selects persistent rup echo when sequence zero
+connects successfully; otherwise it measures one TCP connect outcome per
+request. Statista buffers a response that races ahead of its corresponding
+`Open` entry.
+
 ### Transport trait
 
 ```rust
@@ -158,6 +164,10 @@ stored as `PingerParams.protocol`.
 - TCP/UDP require port in address (`host:port`)
 - ICMP ignores port; `ensure_port()` appends `:0` if missing before DNS resolution
 - DNS resolution via `tokio::net::lookup_host()`
+
+UDP/TCP do not always require a running rup server for an RTT sample: Linux UDP
+accepts matching remote ICMP errors, while TCP connect-probe mode accepts
+completed connection outcomes after the first connection attempt fails.
 
 ### Wire protocol (echo server)
 On UDP/TCP, the server reads the `Echo` header, swaps `resp_size` into `len`,

@@ -106,6 +106,12 @@ async fn main() -> std::io::Result<()> {
 `PingConfig::tos` is the full TOS / traffic class byte. UDP servers reflect the
 received byte on echo responses when available from the operating system.
 
+High-level TCP and UDP sessions automatically accept terminal network replies.
+Linux UDP matches remote ICMP errors through the socket error queue. TCP uses
+rup application echo when its first connection succeeds and otherwise switches
+to per-request connect probes. These outcomes arrive as ordinary
+`PingEvent::Reply` values with `size == 0` and `ttl == None`.
+
 ## Report Values
 
 `PingReport` contains raw RTTs and counters:
@@ -138,3 +144,7 @@ The library also exposes the pipeline parts used by the CLI:
 - `has_port()` and `ensure_port()`
 
 Library functions return `std::io::Result`; they do not terminate the process.
+
+`TcpClientTransport::connect()` remains the echo-only constructor.
+`TcpClientTransport::connect_or_probe(local, remote, tos, wait_time)` exposes
+the high-level echo-or-connect behavior to custom pipelines.

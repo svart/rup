@@ -60,6 +60,10 @@ cargo run --release -- -p udp -A -n 5 127.0.0.1:5000
 cargo run --release -- -p tcp server 127.0.0.1:5000
 cargo run --release -- -p tcp 127.0.0.1:5000
 
+# Serverless terminal replies (choose currently unused local ports)
+cargo run --release -- -p udp -n 3 127.0.0.1:59998
+cargo run --release -- -p tcp -n 3 127.0.0.1:59999
+
 # ICMP
 cargo run --release -- 8.8.8.8
 ```
@@ -93,3 +97,6 @@ coverage percentages unless they were just regenerated.
   errors, but continue past per-client/per-packet errors where possible.
 - TCP and UDP use the shared echo payload format. ICMP wraps that payload in an
   ICMP header and checksum handling.
+- Linux UDP can match remote ICMP errors through `MSG_ERRQUEUE`; TCP high-level
+  sessions fall back to per-request connect probes after an initial connection
+  error.

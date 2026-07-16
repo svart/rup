@@ -60,6 +60,8 @@ fn enable_socket_recv_errors(socket: &Socket, remote: SocketAddr) -> io::Result<
 
 #[cfg(target_os = "linux")]
 fn recv_socket_error(socket: &UdpSocket, payload: &mut [u8]) -> io::Result<Option<Response>> {
+    // MSG_ERRQUEUE returns the payload of the packet that caused the error.
+    // Source: https://man7.org/linux/man-pages/man2/recvmsg.2.html
     use std::os::fd::AsRawFd;
 
     let mut control = [0u8; 128];
@@ -307,6 +309,8 @@ impl Transport for UdpClientTransport {
         loop {
             use tokio::io::Interest;
 
+            // Tokio exposes OS-specific error readiness through Interest::ERROR.
+            // Source: https://docs.rs/tokio/latest/tokio/io/struct.Interest.html#associatedconstant.ERROR
             let queued_response = async {
                 self.queued_errors_recv
                     .lock()

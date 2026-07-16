@@ -125,6 +125,7 @@ fn match_response(requests: &mut VecDeque<Entry>, response: Response) -> Vec<Res
 async fn handle_stat_entry(
     entry: StatEntry,
     requests: &mut VecDeque<Entry>,
+    pending_responses: &mut VecDeque<Response>,
     rtts: &mut Vec<Duration>,
     total_sent: &mut u64,
     to_generator: &Option<Sender<()>>,
@@ -134,19 +135,40 @@ async fn handle_stat_entry(
         StatEntry::Open(t) => {
             *total_sent += 1;
             requests.push_back(t);
+            while pending_responses
+                .front()
+                .is_some_and(|response| requests.back().is_some_and(|req| response.id <= req.id))
+            {
+                let response = pending_responses.pop_front().expect("front checked above");
+                handle_response(response, requests, rtts, to_generator, sink).await;
+            }
         }
         StatEntry::Close(t) => {
-            for response_match in match_response(requests, t) {
-                match response_match {
-                    ResponseMatch::Matched(result) => {
-                        rtts.push(result.rtt);
-                        signal_generator(to_generator).await;
-                        sink.reply(result).await;
-                    }
-                    ResponseMatch::ReorderOrLoss { seq } => {
-                        sink.event(PingEvent::ReorderOrLoss { seq }).await;
-                    }
-                }
+            if requests.back().is_none_or(|req| t.id > req.id) {
+                pending_responses.push_back(t);
+            } else {
+                handle_response(t, requests, rtts, to_generator, sink).await;
+            }
+        }
+    }
+}
+
+async fn handle_response(
+    response: Response,
+    requests: &mut VecDeque<Entry>,
+    rtts: &mut Vec<Duration>,
+    to_generator: &Option<Sender<()>>,
+    sink: &StatSink,
+) {
+    for response_match in match_response(requests, response) {
+        match response_match {
+            ResponseMatch::Matched(result) => {
+                rtts.push(result.rtt);
+                signal_generator(to_generator).await;
+                sink.reply(result).await;
+            }
+            ResponseMatch::ReorderOrLoss { seq } => {
+                sink.event(PingEvent::ReorderOrLoss { seq }).await;
             }
         }
     }
@@ -155,6 +177,7 @@ async fn handle_stat_entry(
 async fn drain_ready_stat_entries(
     from_transport: &mut Receiver<StatEntry>,
     requests: &mut VecDeque<Entry>,
+    pending_responses: &mut VecDeque<Response>,
     rtts: &mut Vec<Duration>,
     total_sent: &mut u64,
     to_generator: &Option<Sender<()>>,
@@ -163,7 +186,16 @@ async fn drain_ready_stat_entries(
     loop {
         match from_transport.try_recv() {
             Ok(entry) => {
-                handle_stat_entry(entry, requests, rtts, total_sent, to_generator, sink).await;
+                handle_stat_entry(
+                    entry,
+                    requests,
+                    pending_responses,
+                    rtts,
+                    total_sent,
+                    to_generator,
+                    sink,
+                )
+                .await;
             }
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => return true,
@@ -187,6 +219,7 @@ async fn run_statista_core(
     sink: StatSink,
 ) -> crate::PingReport {
     let mut requests = VecDeque::<Entry>::new();
+    let mut pending_responses = VecDeque::<Response>::new();
     let mut rtts = Vec::new();
     let mut total_sent = 0u64;
     let mut input_closed = false;
@@ -212,6 +245,7 @@ async fn run_statista_core(
                 handle_stat_entry(
                     resp,
                     &mut requests,
+                    &mut pending_responses,
                     &mut rtts,
                     &mut total_sent,
                     &to_generator,
@@ -224,6 +258,7 @@ async fn run_statista_core(
                 input_closed |= drain_ready_stat_entries(
                     &mut from_transport,
                     &mut requests,
+                    &mut pending_responses,
                     &mut rtts,
                     &mut total_sent,
                     &to_generator,
@@ -738,24 +773,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn statista_ignores_close_before_open() {
+    async fn statista_matches_close_before_open() {
         let (stat_tx, stat_rx) = mpsc::channel(8);
         let (result_tx, mut result_rx) = mpsc::channel(8);
+        let sent = Instant::now();
 
         stat_tx
             .send(StatEntry::Close(crate::Response {
                 id: 0,
-                timestamp: Instant::now(),
+                timestamp: sent + Duration::from_millis(4),
                 size: 0,
                 ttl: None,
             }))
             .await
             .unwrap();
         stat_tx
-            .send(StatEntry::Open(Entry {
-                id: 0,
-                ts: Instant::now(),
-            }))
+            .send(StatEntry::Open(Entry { id: 0, ts: sent }))
             .await
             .unwrap();
         drop(stat_tx);
@@ -763,8 +796,9 @@ mod tests {
         let report =
             statista_with_collector(stat_rx, None, Duration::from_secs(1), result_tx).await;
         assert_eq!(report.sent, 1);
-        assert_eq!(report.received, 0);
-        assert!(result_rx.recv().await.is_none());
+        assert_eq!(report.received, 1);
+        assert_eq!(report.rtts, vec![Duration::from_millis(4)]);
+        assert_eq!(result_rx.recv().await.unwrap().seq, 0);
     }
 
     #[tokio::test]

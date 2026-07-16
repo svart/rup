@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::timeout;
 
 use crate::TrafficClass;
@@ -128,17 +128,69 @@ pub async fn server_transport_until(
 }
 
 #[derive(Clone)]
-pub struct TcpClientTransport {
+struct EchoConnection {
     reader: Arc<Mutex<OwnedReadHalf>>,
     writer: Arc<Mutex<OwnedWriteHalf>>,
 }
 
-impl TcpClientTransport {
-    pub fn new(stream: TcpStream) -> Self {
+impl EchoConnection {
+    fn new(stream: TcpStream) -> Self {
         let (reader, writer) = stream.into_split();
-        TcpClientTransport {
+        Self {
             reader: Arc::new(Mutex::new(reader)),
             writer: Arc::new(Mutex::new(writer)),
+        }
+    }
+}
+
+enum AutoTcpMode {
+    Undecided(Option<tokio::net::TcpSocket>),
+    Echo(EchoConnection),
+    Probe,
+}
+
+struct AutoTcpTransport {
+    local: SocketAddr,
+    remote: SocketAddr,
+    tos: Option<TrafficClass>,
+    wait_time: Duration,
+    mode: Mutex<AutoTcpMode>,
+    mode_changed: Notify,
+    responses_send: mpsc::UnboundedSender<Response>,
+    responses_recv: Mutex<mpsc::UnboundedReceiver<Response>>,
+}
+
+enum TcpClientKind {
+    Echo(EchoConnection),
+    Auto(Box<AutoTcpTransport>),
+}
+
+#[derive(Clone)]
+pub struct TcpClientTransport {
+    kind: Arc<TcpClientKind>,
+}
+
+fn configured_tcp_socket(
+    local: SocketAddr,
+    remote: SocketAddr,
+    tos: Option<TrafficClass>,
+) -> io::Result<tokio::net::TcpSocket> {
+    let socket = if remote.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.bind(local)?;
+    if let Some(tos_value) = tos {
+        traffic::set_tcp_tos(&socket, remote, tos_value)?;
+    }
+    Ok(socket)
+}
+
+impl TcpClientTransport {
+    pub fn new(stream: TcpStream) -> Self {
+        Self {
+            kind: Arc::new(TcpClientKind::Echo(EchoConnection::new(stream))),
         }
     }
 
@@ -147,67 +199,199 @@ impl TcpClientTransport {
         remote: SocketAddr,
         tos: Option<TrafficClass>,
     ) -> io::Result<Self> {
-        let sock = if remote.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
-        } else {
-            tokio::net::TcpSocket::new_v6()?
-        };
-        sock.bind(local)?;
-        if let Some(tos_value) = tos {
-            traffic::set_tcp_tos(&sock, remote, tos_value)?;
-        }
-        let stream = sock.connect(remote).await?;
+        let stream = configured_tcp_socket(local, remote, tos)?
+            .connect(remote)
+            .await?;
         Ok(Self::new(stream))
+    }
+
+    /// Creates a transport that selects application echo or TCP connect probes.
+    ///
+    /// The first request attempts to connect. A successful connection keeps the
+    /// regular rup echo protocol; a completed connection error switches all
+    /// requests in this transport to independent connect probes.
+    pub async fn connect_or_probe(
+        local: SocketAddr,
+        remote: SocketAddr,
+        tos: Option<TrafficClass>,
+        wait_time: Duration,
+    ) -> io::Result<Self> {
+        let initial_socket = configured_tcp_socket(local, remote, tos)?;
+        let (responses_send, responses_recv) = mpsc::unbounded_channel();
+        Ok(Self {
+            kind: Arc::new(TcpClientKind::Auto(Box::new(AutoTcpTransport {
+                local,
+                remote,
+                tos,
+                wait_time,
+                mode: Mutex::new(AutoTcpMode::Undecided(Some(initial_socket))),
+                mode_changed: Notify::new(),
+                responses_send,
+                responses_recv: Mutex::new(responses_recv),
+            }))),
+        })
     }
 }
 
 impl Transport for TcpClientTransport {
     async fn send(&self, req: &Request) -> io::Result<Instant> {
-        let send_buf = echo_codec::encode_request(req);
-        let mut writer = self.writer.lock().await;
-        timeout(IO_TIMEOUT, writer.write_all(&send_buf))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "send timeout"))?
-            .map_err(|e| io::Error::new(e.kind(), format!("send failed: {e}")))?;
-
-        Ok(Instant::now())
+        match self.kind.as_ref() {
+            TcpClientKind::Echo(connection) => send_echo_request(&connection.writer, req).await,
+            TcpClientKind::Auto(transport) => send_auto_request(transport, req).await,
+        }
     }
 
     async fn recv(&self) -> io::Result<Response> {
-        let mut reader = self.reader.lock().await;
-        let mut hdr = [0; PING_HDR_LEN];
-        timeout(IO_TIMEOUT, reader.read_exact(&mut hdr))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv timeout"))?
-            .map_err(|e| match e.kind() {
-                io::ErrorKind::UnexpectedEof => {
-                    io::Error::new(io::ErrorKind::ConnectionAborted, "connection closed")
-                }
-                _ => io::Error::new(e.kind(), format!("recv header failed: {e}")),
-            })?;
-
-        let echo = echo_codec::decode_header(&hdr)?;
-
-        if echo.len as usize > PING_HDR_LEN {
-            let mut extra = vec![0; echo.len as usize - PING_HDR_LEN];
-            timeout(IO_TIMEOUT, reader.read_exact(&mut extra))
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv payload timeout"))?
-                .map_err(|e| match e.kind() {
-                    io::ErrorKind::UnexpectedEof => io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "connection closed reading payload",
-                    ),
-                    _ => io::Error::new(e.kind(), format!("recv payload failed: {e}")),
-                })?;
+        match self.kind.as_ref() {
+            TcpClientKind::Echo(connection) => recv_echo_response(&connection.reader).await,
+            TcpClientKind::Auto(transport) => recv_auto_response(transport).await,
         }
+    }
+}
 
-        Ok(Response {
-            id: echo.id,
+async fn send_echo_request(
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    req: &Request,
+) -> io::Result<Instant> {
+    let send_buf = echo_codec::encode_request(req);
+    let mut writer = writer.lock().await;
+    timeout(IO_TIMEOUT, writer.write_all(&send_buf))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "send timeout"))?
+        .map_err(|e| io::Error::new(e.kind(), format!("send failed: {e}")))?;
+
+    Ok(Instant::now())
+}
+
+async fn recv_echo_response(reader: &Arc<Mutex<OwnedReadHalf>>) -> io::Result<Response> {
+    let mut reader = reader.lock().await;
+    let mut hdr = [0; PING_HDR_LEN];
+    timeout(IO_TIMEOUT, reader.read_exact(&mut hdr))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv timeout"))?
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => {
+                io::Error::new(io::ErrorKind::ConnectionAborted, "connection closed")
+            }
+            _ => io::Error::new(e.kind(), format!("recv header failed: {e}")),
+        })?;
+
+    let echo = echo_codec::decode_header(&hdr)?;
+
+    if echo.len as usize > PING_HDR_LEN {
+        let mut extra = vec![0; echo.len as usize - PING_HDR_LEN];
+        timeout(IO_TIMEOUT, reader.read_exact(&mut extra))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv payload timeout"))?
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::UnexpectedEof => io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "connection closed reading payload",
+                ),
+                _ => io::Error::new(e.kind(), format!("recv payload failed: {e}")),
+            })?;
+    }
+
+    Ok(Response {
+        id: echo.id,
+        timestamp: Instant::now(),
+        size: echo.len as usize,
+        ttl: None,
+    })
+}
+
+async fn send_auto_request(transport: &AutoTcpTransport, req: &Request) -> io::Result<Instant> {
+    let mut mode = transport.mode.lock().await;
+    match &mut *mode {
+        AutoTcpMode::Echo(connection) => {
+            let writer = connection.writer.clone();
+            drop(mode);
+            send_echo_request(&writer, req).await
+        }
+        AutoTcpMode::Probe => {
+            drop(mode);
+            send_connect_probe(transport, req.id).await
+        }
+        AutoTcpMode::Undecided(initial_socket) => {
+            let socket = initial_socket
+                .take()
+                .expect("initial TCP socket is present");
+            let started = Instant::now();
+            match timeout(transport.wait_time, socket.connect(transport.remote)).await {
+                Ok(Ok(stream)) => {
+                    let connection = EchoConnection::new(stream);
+                    let timestamp = send_echo_request(&connection.writer, req).await?;
+                    *mode = AutoTcpMode::Echo(connection);
+                    transport.mode_changed.notify_waiters();
+                    Ok(timestamp)
+                }
+                Ok(Err(_)) => {
+                    *mode = AutoTcpMode::Probe;
+                    transport.mode_changed.notify_waiters();
+                    queue_connect_response(transport, req.id)?;
+                    Ok(started)
+                }
+                Err(_) => {
+                    *mode = AutoTcpMode::Probe;
+                    transport.mode_changed.notify_waiters();
+                    Ok(started)
+                }
+            }
+        }
+    }
+}
+
+async fn send_connect_probe(transport: &AutoTcpTransport, id: u64) -> io::Result<Instant> {
+    let socket = configured_tcp_socket(transport.local, transport.remote, transport.tos)?;
+    let started = Instant::now();
+    if timeout(transport.wait_time, socket.connect(transport.remote))
+        .await
+        .is_ok()
+    {
+        queue_connect_response(transport, id)?;
+    }
+    Ok(started)
+}
+
+fn queue_connect_response(transport: &AutoTcpTransport, id: u64) -> io::Result<()> {
+    transport
+        .responses_send
+        .send(Response {
+            id,
             timestamp: Instant::now(),
-            size: echo.len as usize,
+            size: 0,
             ttl: None,
         })
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP probe receiver closed"))
+}
+
+async fn recv_auto_response(transport: &AutoTcpTransport) -> io::Result<Response> {
+    loop {
+        let mode_changed = transport.mode_changed.notified();
+        let echo_reader = {
+            let mode = transport.mode.lock().await;
+            match &*mode {
+                AutoTcpMode::Undecided(_) => None,
+                AutoTcpMode::Echo(connection) => Some(connection.reader.clone()),
+                AutoTcpMode::Probe => {
+                    drop(mode);
+                    return transport
+                        .responses_recv
+                        .lock()
+                        .await
+                        .recv()
+                        .await
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, "TCP probe sender closed")
+                        });
+                }
+            }
+        };
+
+        if let Some(reader) = echo_reader {
+            return recv_echo_response(&reader).await;
+        }
+        mode_changed.await;
     }
 }
 
@@ -380,6 +564,35 @@ mod tests {
         assert!(result.is_err());
 
         server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_or_probe_closed_port_returns_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = listener.local_addr().unwrap();
+        drop(listener);
+
+        let transport = TcpClientTransport::connect_or_probe(
+            "0.0.0.0:0".parse().unwrap(),
+            remote,
+            None,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        let request = Request {
+            id: 9,
+            request_size: None,
+            response_size: None,
+        };
+
+        let sent = transport.send(&request).await.unwrap();
+        let response = transport.recv().await.unwrap();
+
+        assert_eq!(response.id, 9);
+        assert!(response.timestamp >= sent);
+        assert_eq!(response.size, 0);
+        assert_eq!(response.ttl, None);
     }
 
     #[tokio::test]

@@ -314,8 +314,13 @@ async fn spawn_ping_session(
             Ok(spawn_ping_with_transport(transport, config, events))
         }
         Protocol::Tcp => {
-            let transport =
-                TcpClientTransport::connect(config.local, remote_addr, config.tos).await?;
+            let transport = TcpClientTransport::connect_or_probe(
+                config.local,
+                remote_addr,
+                config.tos,
+                config.wait_time,
+            )
+            .await?;
             Ok(spawn_ping_with_transport(transport, config, events))
         }
         Protocol::Icmp => {
@@ -864,6 +869,35 @@ mod tests {
         assert_eq!(report.sent, 2);
         assert_eq!(report.received, 2);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_ping_session_tcp_closed_port_advances_adaptive_mode() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = listener.local_addr().unwrap();
+        drop(listener);
+
+        let report = run_ping_session(PingConfig {
+            remote,
+            local: "0.0.0.0:0".parse().unwrap(),
+            protocol: Protocol::Tcp,
+            interval: Duration::from_millis(1),
+            adaptive: true,
+            wait_time: Duration::from_millis(100),
+            request_size: None,
+            response_size: None,
+            tos: None,
+            ping_number: Some(2),
+            run_time: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.sent, 2);
+        assert_eq!(report.received, 2);
+        assert_eq!(report.loss_pct(), 0.0);
     }
 
     #[tokio::test]

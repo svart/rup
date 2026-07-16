@@ -14,7 +14,7 @@ rup -n 5 8.8.8.8
 rup server 127.0.0.1:5000
 rup -p udp -n 5 127.0.0.1:5000
 
-# Emit rup.ping JSON Lines version 2 with absolute UTC timestamps.
+# Emit rup.ping JSON Lines version 3 with absolute UTC timestamps.
 rup --output jsonl -p udp -n 5 127.0.0.1:5000
 
 # Set outgoing IP TOS / IPv6 traffic class.
@@ -30,7 +30,8 @@ UDP/TCP addresses require `host:port`. ICMP accepts `host` or `host:port`; the
 port is ignored.
 
 Terminal network responses are included in received packets and RTT statistics.
-They are reported through the same reply records with a payload size of zero.
+Human output labels them as terminal responses; JSONL uses `terminal_reply`
+records with a payload size of zero.
 
 `--tos <0-255>` sets the full outgoing TOS / traffic class byte for client
 packets. UDP servers reflect the received byte on echo responses when the

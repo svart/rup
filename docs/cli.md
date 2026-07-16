@@ -106,19 +106,20 @@ rtt min/avg/max/mdev = 0.052/0.052/0.053/0.001 ms
 ```
 
 Use `--output jsonl` for machine-readable output. The first line is a
-`rup.ping` metadata record with schema version 1. It is followed by `reply`,
-`timeout`, or `reorder_or_loss` event records and one final `summary` record.
-Every record occupies exactly one line; errors remain on stderr so successful
-stdout can be parsed as a JSON Lines stream.
+`rup.ping` metadata record with schema version 3. It is followed by `reply`,
+`terminal_reply`, `timeout`, or `reorder_or_loss` event records and one final
+`summary` record. Every record occupies exactly one line; errors remain on
+stderr so successful stdout can be parsed as a JSON Lines stream.
 
-Terminal UDP/TCP responses use the existing `reply` record with
-`size_bytes: 0` and `ttl: null`; they count toward `received` and RTT summary
-statistics.
+Terminal UDP/TCP responses use `terminal_reply` with `size_bytes: 0` and
+`ttl: null`; they count toward `received` and RTT summary statistics. Event and
+summary records contain absolute `timestamp_ms` values and do not include
+relative elapsed-time fields.
 
 ```json
-{"adaptive":false,"address":"127.0.0.1","interval_ms":1000,"packet_size_bytes":40,"protocol":"icmp","record":"metadata","request_size_bytes":12,"schema":"rup.ping","target":"127.0.0.1","version":1}
-{"elapsed_ms":0,"record":"reply","rtt_ms":0.053,"seq":0,"size_bytes":12,"ttl":64}
-{"elapsed_ms":1,"loss_percent":0.0,"received":1,"record":"summary","rtt_max_ms":0.053,"rtt_mean_ms":0.053,"rtt_median_ms":0.053,"rtt_min_ms":0.053,"rtt_std_dev_ms":0.0,"sent":1}
+{"adaptive":false,"address":"127.0.0.1","interval_ms":1000,"packet_size_bytes":40,"protocol":"icmp","record":"metadata","request_size_bytes":12,"schema":"rup.ping","started_at_ms":1700000000000,"target":"127.0.0.1","version":3}
+{"record":"reply","rtt_ms":0.053,"seq":0,"size_bytes":12,"timestamp_ms":1700000000001,"ttl":64}
+{"loss_percent":0.0,"received":1,"record":"summary","rtt_max_ms":0.053,"rtt_mean_ms":0.053,"rtt_median_ms":0.053,"rtt_min_ms":0.053,"rtt_std_dev_ms":0.0,"sent":1,"timestamp_ms":1700000000002}
 ```
 
 `--output` is a client option and is rejected with the `server` subcommand.

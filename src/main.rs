@@ -86,6 +86,15 @@ fn header_line(ctx: &OutputContext) -> String {
 }
 
 fn reply_line(ctx: &OutputContext, result: &PingResult) -> String {
+    if result.size == 0 {
+        return format!(
+            "terminal response from {}: seq={} time={} ms",
+            ctx.target.address.ip(),
+            result.seq,
+            fmt_duration_ms_value(result.rtt)
+        );
+    }
+
     let ttl = result
         .ttl
         .map(|ttl| format!(" ttl={ttl}"))
@@ -140,7 +149,7 @@ fn jsonl_metadata(
 ) -> String {
     serde_json::to_string(&json!({
         "schema": "rup.ping",
-        "version": 2,
+        "version": 3,
         "record": "metadata",
         "started_at_ms": started_at_ms,
         "target": ctx.target.input,
@@ -158,9 +167,8 @@ fn jsonl_event(event: &PingEvent, elapsed: Duration, started_at_ms: u64) -> Stri
     let timestamp_ms = absolute_timestamp_ms(started_at_ms, elapsed);
     let value = match event {
         PingEvent::Reply(result) => json!({
-            "record": "reply",
+            "record": if result.size == 0 { "terminal_reply" } else { "reply" },
             "timestamp_ms": timestamp_ms,
-            "elapsed_ms": elapsed.as_millis(),
             "seq": result.seq,
             "rtt_ms": duration_ms(result.rtt),
             "size_bytes": result.size,
@@ -169,13 +177,11 @@ fn jsonl_event(event: &PingEvent, elapsed: Duration, started_at_ms: u64) -> Stri
         PingEvent::Timeout { seq } => json!({
             "record": "timeout",
             "timestamp_ms": timestamp_ms,
-            "elapsed_ms": elapsed.as_millis(),
             "seq": seq,
         }),
         PingEvent::ReorderOrLoss { seq } => json!({
             "record": "reorder_or_loss",
             "timestamp_ms": timestamp_ms,
-            "elapsed_ms": elapsed.as_millis(),
             "seq": seq,
         }),
     };
@@ -186,7 +192,6 @@ fn jsonl_summary(report: &PingReport, elapsed: Duration, started_at_ms: u64) -> 
     serde_json::to_string(&json!({
         "record": "summary",
         "timestamp_ms": absolute_timestamp_ms(started_at_ms, elapsed),
-        "elapsed_ms": elapsed.as_millis(),
         "sent": report.sent,
         "received": report.received,
         "loss_percent": report.loss_pct(),
@@ -362,7 +367,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(values[0]["schema"], "rup.ping");
-        assert_eq!(values[0]["version"], 2);
+        assert_eq!(values[0]["version"], 3);
         assert_eq!(values[0]["record"], "metadata");
         assert_eq!(values[0]["started_at_ms"], 1_700_000_000_000_u64);
         assert_eq!(values[1]["record"], "reply");
@@ -374,7 +379,29 @@ mod tests {
         assert_eq!(values[4]["record"], "summary");
         assert_eq!(values[4]["timestamp_ms"], 1_700_000_000_350_u64);
         assert!((values[4]["loss_percent"].as_f64().unwrap() - 100.0 / 3.0).abs() < 1e-12);
+        assert!(values.iter().all(|value| value.get("elapsed_ms").is_none()));
         assert!(records.iter().all(|record| !record.contains('\n')));
+    }
+
+    #[test]
+    fn jsonl_terminal_reply_has_distinct_record_type() {
+        let event = PingEvent::Reply(PingResult {
+            seq: 3,
+            rtt: Duration::from_micros(75),
+            size: 0,
+            ttl: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&jsonl_event(
+            &event,
+            Duration::from_millis(20),
+            1_700_000_000_000,
+        ))
+        .unwrap();
+
+        assert_eq!(value["record"], "terminal_reply");
+        assert_eq!(value["timestamp_ms"], 1_700_000_000_020_u64);
+        assert!(value.get("elapsed_ms").is_none());
     }
 
     #[test]
@@ -414,6 +441,29 @@ mod tests {
         assert_eq!(
             reply_line(&ctx, &result),
             "64 bytes from 127.0.0.1: seq=0 ttl=64 time=0.042 ms"
+        );
+    }
+
+    #[test]
+    fn reply_line_labels_terminal_network_response() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "127.0.0.1:5000".to_string(),
+                address: "127.0.0.1:5000".parse().unwrap(),
+            },
+            protocol: Protocol::Udp,
+            request_size: None,
+        };
+        let result = PingResult {
+            seq: 4,
+            rtt: Duration::from_micros(80),
+            size: 0,
+            ttl: None,
+        };
+
+        assert_eq!(
+            reply_line(&ctx, &result),
+            "terminal response from 127.0.0.1: seq=4 time=0.080 ms"
         );
     }
 

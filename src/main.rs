@@ -5,9 +5,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime;
 
 mod cli;
+mod output_template;
 
 use cli::CliParams::{PingerParams, ServerParams};
 use cli::OutputFormat;
+use output_template::{ReplyFormat, fmt_duration_ms_value};
 use rup::{PING_HDR_LEN, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
 use serde_json::json;
 
@@ -56,10 +58,6 @@ async fn resolve_remote_target(remote: String, protocol: Protocol) -> io::Result
     })
 }
 
-fn fmt_duration_ms_value(d: Duration) -> String {
-    format!("{:.3}", d.as_secs_f64() * 1000.0)
-}
-
 fn data_size(ctx: &OutputContext) -> usize {
     ctx.request_size
         .map(PacketSize::get)
@@ -85,7 +83,16 @@ fn header_line(ctx: &OutputContext) -> String {
     )
 }
 
-fn reply_line(ctx: &OutputContext, result: &PingResult) -> String {
+fn reply_line(ctx: &OutputContext, result: &PingResult, format: Option<&ReplyFormat>) -> String {
+    if let Some(format) = format {
+        return format.render(
+            &ctx.target.input,
+            ctx.target.address.ip(),
+            ctx.protocol,
+            result,
+        );
+    }
+
     if result.size == 0 {
         return format!(
             "terminal response from {}: seq={} time={} ms",
@@ -303,7 +310,7 @@ async fn run_client(params: cli::PingerParams) {
                 match params.output {
                     OutputFormat::Human => {
                         if let PingEvent::Reply(result) = event {
-                            println!("{}", reply_line(&ctx, &result));
+                            println!("{}", reply_line(&ctx, &result, params.format.as_ref()));
                         }
                     }
                     OutputFormat::Jsonl => {
@@ -459,7 +466,7 @@ mod tests {
         };
 
         assert_eq!(
-            reply_line(&ctx, &result),
+            reply_line(&ctx, &result, None),
             "64 bytes from 127.0.0.1: seq=0 ttl=64 time=0.042 ms"
         );
     }
@@ -482,8 +489,32 @@ mod tests {
         };
 
         assert_eq!(
-            reply_line(&ctx, &result),
+            reply_line(&ctx, &result, None),
             "terminal response from 127.0.0.1: seq=4 time=0.080 ms"
+        );
+    }
+
+    #[test]
+    fn reply_line_uses_custom_format_when_present() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "example.test".to_string(),
+                address: "192.0.2.1:0".parse().unwrap(),
+            },
+            protocol: Protocol::Icmp,
+            request_size: None,
+        };
+        let result = PingResult {
+            seq: 7,
+            rtt: Duration::from_micros(42),
+            size: 64,
+            ttl: Some(64),
+        };
+        let format = "{ip}: {seq} => {rtt}".parse().unwrap();
+
+        assert_eq!(
+            reply_line(&ctx, &result, Some(&format)),
+            "192.0.2.1: 7 => 0.042 ms"
         );
     }
 

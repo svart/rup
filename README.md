@@ -17,6 +17,9 @@ rup -p udp -n 5 127.0.0.1:5000
 # Emit rup.ping JSON Lines version 3 with absolute UTC timestamps.
 rup --output jsonl -p udp -n 5 127.0.0.1:5000
 
+# Customize human-readable reply records.
+rup 127.0.0.1 --format '{ip}: {seq} => {rtt}'
+
 # Set outgoing IP TOS / IPv6 traffic class.
 rup -p udp --tos 184 -n 5 127.0.0.1:5000
 

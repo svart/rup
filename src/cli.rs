@@ -2,6 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::output_template::ReplyFormat;
 use rup::pinger::PING_HDR_LEN;
 use rup::{PacketSize, Protocol, TrafficClass};
 
@@ -17,6 +18,7 @@ const ARG_PING_NUMBER: &str = "ping-number";
 const ARG_RUN_TIME: &str = "run-time";
 const ARG_PROTOCOL: &str = "protocol";
 const ARG_OUTPUT: &str = "output";
+const ARG_FORMAT: &str = "format";
 const CMD_SERVER: &str = "server";
 
 const CLIENT_ARGS: &[&str] = &[
@@ -31,6 +33,7 @@ const CLIENT_ARGS: &[&str] = &[
     ARG_PING_NUMBER,
     ARG_RUN_TIME,
     ARG_OUTPUT,
+    ARG_FORMAT,
 ];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -132,6 +135,14 @@ fn cli() -> Command {
                 .value_parser(["human", "jsonl"])
                 .default_value("human"),
         )
+        .arg(
+            Arg::new(ARG_FORMAT)
+                .long("format")
+                .value_name("template")
+                .help("Format each human-readable ping reply")
+                .action(ArgAction::Set)
+                .value_parser(clap::value_parser!(ReplyFormat)),
+        )
         .subcommand(
             Command::new(CMD_SERVER)
                 .about("Receive requests and send them back immediately")
@@ -177,6 +188,7 @@ pub(crate) struct PingerParams {
     pub protocol: Protocol,
     pub run_time: Option<Duration>,
     pub output: OutputFormat,
+    pub format: Option<ReplyFormat>,
 }
 
 pub(crate) enum CliParams {
@@ -190,6 +202,15 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let matches = cli().try_get_matches_from(args)?;
+
+    if matches.get_one::<ReplyFormat>(ARG_FORMAT).is_some()
+        && matches.get_one::<String>(ARG_OUTPUT).map(String::as_str) == Some("jsonl")
+    {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--format cannot be used with --output jsonl",
+        ));
+    }
 
     Ok(match matches.subcommand() {
         Some((CMD_SERVER, submatch)) => {
@@ -242,6 +263,7 @@ where
                 Some("human") => OutputFormat::Human,
                 _ => unreachable!("clap validates output formats"),
             },
+            format: matches.get_one::<ReplyFormat>(ARG_FORMAT).cloned(),
         }),
         _ => unreachable!("clap validates subcommands"),
     })
@@ -344,6 +366,40 @@ mod tests {
     }
 
     #[test]
+    fn cli_client_accepts_custom_reply_format() {
+        let params =
+            get_cli_params_from(["rup", "8.8.8.8", "--format", "{ip}: {seq} => {rtt}"]).unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert!(params.format.is_some());
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn cli_client_format_conflicts_with_jsonl_output() {
+        assert!(
+            get_cli_params_from(["rup", "8.8.8.8", "--output", "jsonl", "--format", "{seq}",])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_client_format_can_be_used_with_explicit_human_output() {
+        assert!(
+            get_cli_params_from(["rup", "8.8.8.8", "--output", "human", "--format", "{seq}",])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn cli_client_rejects_invalid_custom_reply_format() {
+        assert!(get_cli_params_from(["rup", "8.8.8.8", "--format", "{rtt_ms:.2}"]).is_err());
+    }
+
+    #[test]
     fn cli_client_output_defaults_to_human() {
         let params = get_cli_params_from(["rup", "8.8.8.8"]).unwrap();
 
@@ -359,6 +415,13 @@ mod tests {
     fn cli_server_rejects_output_format() {
         assert!(
             get_cli_params_from(["rup", "--output", "jsonl", "server", "127.0.0.1:5000",]).is_err()
+        );
+    }
+
+    #[test]
+    fn cli_server_rejects_custom_reply_format() {
+        assert!(
+            get_cli_params_from(["rup", "--format", "{seq}", "server", "127.0.0.1:5000",]).is_err()
         );
     }
 

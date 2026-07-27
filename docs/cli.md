@@ -35,6 +35,7 @@ rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 | `--tos <0-255>` | Outgoing IP TOS / IPv6 traffic class byte |
 | `--local-address <addr>` | Local bind address [default: `0.0.0.0:0`] |
 | `--output <human|jsonl>` | Output format [default: `human`] |
+| `--format <template>` | Customize each human-readable reply line |
 
 Examples:
 
@@ -107,6 +108,42 @@ PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
 rtt min/avg/max/mdev = 0.052/0.052/0.053/0.001 ms
 ```
+
+Use `--format` to customize each reply line while retaining the normal header
+and final statistics:
+
+```sh
+rup 127.0.0.1 --format '{ip}: {seq} => {rtt}'
+```
+
+```text
+PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
+127.0.0.1: 0 => 0.053 ms
+127.0.0.1: 1 => 0.052 ms
+
+--- 127.0.0.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 0.052/0.052/0.053/0.001 ms
+```
+
+The supported fields are:
+
+| Field | Value |
+|-------|-------|
+| `{target}` | Original hostname or address supplied on the command line |
+| `{ip}` | Resolved destination IP address |
+| `{seq}` | Sequence number |
+| `{rtt}` | RTT in milliseconds with three decimal places and the `ms` unit |
+| `{rtt_ms}` | RTT in milliseconds with three decimal places and no unit |
+| `{size}` | Response size in bytes |
+| `{ttl}` | TTL, or `-` when unavailable |
+| `{status}` | `reply` or `terminal_reply` |
+| `{protocol}` | `icmp`, `udp`, or `tcp` |
+
+Use `{{` and `}}` for literal braces. Invalid fields, unmatched braces, and
+embedded newlines are rejected before the ping session starts. `--format`
+cannot be used with `--output jsonl`. Placeholder precision modifiers are not
+supported.
 
 Use `--output jsonl` for machine-readable output. The first line is a
 `rup.ping` metadata record with schema version 3. It is followed by `reply`,

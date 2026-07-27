@@ -20,7 +20,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 const CHANNEL_CAP: usize = 1024;
 
@@ -29,6 +29,13 @@ struct SessionChannels {
     transmitter_input: mpsc::Receiver<pinger::Request>,
     transport_to_statista: mpsc::Sender<pinger::StatEntry>,
     statista_input: mpsc::Receiver<pinger::StatEntry>,
+}
+
+enum SessionTask {
+    Generator,
+    Transmitter(io::Result<()>),
+    Receiver(io::Result<()>),
+    Statistics(PingReport),
 }
 
 impl SessionChannels {
@@ -405,6 +412,7 @@ where
     T: Transport + Clone + Send + 'static,
 {
     let channels = SessionChannels::new();
+    let expected_requests = config.ping_number;
 
     let (send_mode, txtr_gen) = if config.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(CHANNEL_CAP);
@@ -414,12 +422,24 @@ where
     };
 
     let (sends_done_send, sends_done_recv) = mpsc::channel(1);
-    let (tx_handle, rx_handle) = spawn_pinger_tasks(
-        transport,
-        channels.transmitter_input,
-        channels.transport_to_statista,
-        sends_done_send,
-    );
+    let mut tasks = JoinSet::new();
+
+    let transmitter_transport = transport.clone();
+    let statistics_sender = channels.transport_to_statista.clone();
+    tasks.spawn(async move {
+        let result = transmitter(
+            transmitter_transport,
+            channels.transmitter_input,
+            statistics_sender,
+        )
+        .await;
+        let _ = sends_done_send.send(()).await;
+        SessionTask::Transmitter(result)
+    });
+
+    tasks.spawn(async move {
+        SessionTask::Receiver(receiver(transport, channels.transport_to_statista).await)
+    });
 
     let generator_config = pinger::GeneratorConfig {
         send_mode,
@@ -428,7 +448,7 @@ where
         request_size: config.request_size,
         response_size: config.response_size,
     };
-    let generator = tokio::spawn(async move {
+    let generator_task = tasks.spawn(async move {
         let run = pinger::generator(channels.generator_to_transmitter, generator_config);
         if let Some(stop) = stop {
             tokio::select! {
@@ -438,34 +458,79 @@ where
         } else {
             run.await;
         }
+        SessionTask::Generator
     });
 
-    let statista = if let Some(events) = events {
-        tokio::spawn(statistics::statista_with_events_and_send_done(
-            channels.statista_input,
-            sends_done_recv,
-            txtr_gen,
-            config.wait_time,
-            events,
-        ))
+    if let Some(events) = events {
+        tasks.spawn(async move {
+            SessionTask::Statistics(
+                statistics::statista_with_events_and_send_done(
+                    channels.statista_input,
+                    sends_done_recv,
+                    txtr_gen,
+                    config.wait_time,
+                    events,
+                )
+                .await,
+            )
+        });
     } else {
-        tokio::spawn(statistics::statista_report_with_send_done(
-            channels.statista_input,
-            sends_done_recv,
-            txtr_gen,
-            config.wait_time,
-        ))
-    };
+        tasks.spawn(async move {
+            SessionTask::Statistics(
+                statistics::statista_report_with_send_done(
+                    channels.statista_input,
+                    sends_done_recv,
+                    txtr_gen,
+                    config.wait_time,
+                )
+                .await,
+            )
+        });
+    }
 
-    let _ = generator.await;
-    let _ = tx_handle.await;
-    let stat_report = statista
-        .await
-        .map_err(|e| io::Error::other(format!("statista task failed: {e}")))?;
+    let mut receiver_error = None;
+    while let Some(task) = tasks.join_next().await {
+        let task = match task {
+            Ok(task) => task,
+            Err(error) if error.is_cancelled() && receiver_error.is_some() => continue,
+            Err(error) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Err(io::Error::other(format!("session task failed: {error}")));
+            }
+        };
 
-    rx_handle.abort();
+        match task {
+            SessionTask::Generator | SessionTask::Transmitter(Ok(())) => {}
+            SessionTask::Transmitter(Err(error)) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Err(error);
+            }
+            SessionTask::Receiver(result) => {
+                receiver_error = Some(result.err().unwrap_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "receiver stopped before session completion",
+                    )
+                }));
+                generator_task.abort();
+            }
+            SessionTask::Statistics(report) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                if let Some(error) = receiver_error
+                    && (expected_requests != Some(report.sent) || report.received != report.sent)
+                {
+                    return Err(error);
+                }
+                return Ok(report);
+            }
+        }
+    }
 
-    Ok(stat_report)
+    Err(receiver_error
+        .unwrap_or_else(|| io::Error::other("ping session stopped without producing a report")))
 }
 
 pub async fn run_server(protocol: Protocol, local: SocketAddr) -> io::Result<()> {
@@ -488,22 +553,6 @@ pub async fn run_server_until(
         }
     }
     Ok(())
-}
-
-fn spawn_pinger_tasks<T: Transport + Clone + Send + 'static>(
-    transport: T,
-    gen_txtr_recv: mpsc::Receiver<pinger::Request>,
-    txtr_stat_send: mpsc::Sender<pinger::StatEntry>,
-    sends_done: mpsc::Sender<()>,
-) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
-    let t2 = transport.clone();
-    let txtr_stat_send_for_tx = txtr_stat_send.clone();
-    let tx = tokio::spawn(async move {
-        transmitter(t2, gen_txtr_recv, txtr_stat_send_for_tx).await;
-        let _ = sends_done.send(()).await;
-    });
-    let rx = tokio::spawn(receiver(transport, txtr_stat_send));
-    (tx, rx)
 }
 
 #[cfg(test)]
@@ -532,6 +581,12 @@ mod tests {
         pending: Arc<Mutex<VecDeque<u64>>>,
         delay: Duration,
     }
+
+    #[derive(Clone)]
+    struct SendErrorTransport;
+
+    #[derive(Clone)]
+    struct ReceiveErrorTransport;
 
     impl ScriptedTransport {
         fn new(responses: impl IntoIterator<Item = u64>) -> Self {
@@ -644,6 +699,26 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
+        }
+    }
+
+    impl Transport for SendErrorTransport {
+        async fn send(&self, _req: &Request) -> io::Result<Instant> {
+            Err(io::Error::other("scripted send failure"))
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            std::future::pending().await
+        }
+    }
+
+    impl Transport for ReceiveErrorTransport {
+        async fn send(&self, _req: &Request) -> io::Result<Instant> {
+            Ok(Instant::now())
+        }
+
+        async fn recv(&self) -> io::Result<Response> {
+            Err(io::Error::other("scripted receive failure"))
         }
     }
 
@@ -984,6 +1059,56 @@ mod tests {
         assert_eq!(report.sent, 3);
         assert_eq!(report.received, 3);
         assert_eq!(report.rtts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_propagates_send_failure() {
+        let error = run_ping_with_transport(
+            SendErrorTransport,
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(1),
+                adaptive: false,
+                wait_time: Duration::from_millis(1),
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(1),
+                run_time: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("scripted send failure"));
+    }
+
+    #[tokio::test]
+    async fn run_ping_with_transport_propagates_receive_failure() {
+        let error = run_ping_with_transport(
+            ReceiveErrorTransport,
+            PingConfig {
+                remote: "127.0.0.1:0".parse().unwrap(),
+                local: "0.0.0.0:0".parse().unwrap(),
+                protocol: Protocol::Udp,
+                interval: Duration::from_millis(1),
+                adaptive: false,
+                wait_time: Duration::from_millis(1),
+                request_size: None,
+                response_size: None,
+                tos: None,
+                ping_number: Some(1),
+                run_time: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("scripted receive failure"));
     }
 
     #[tokio::test]

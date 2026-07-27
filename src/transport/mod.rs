@@ -18,39 +18,31 @@ pub async fn transmitter(
     transport: impl Transport,
     mut from_generator: Receiver<Request>,
     to_statista: Sender<StatEntry>,
-) {
+) -> io::Result<()> {
     while let Some(req) = from_generator.recv().await {
-        match transport.send(&req).await {
-            Ok(timestamp) => {
-                let s = StatEntry::Open(Entry {
-                    id: req.id,
-                    ts: timestamp,
-                });
-                if to_statista.send(s).await.is_err() {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("transport error: send failed: {e}");
-                break;
-            }
+        let timestamp = transport
+            .send(&req)
+            .await
+            .map_err(|error| io::Error::new(error.kind(), format!("send failed: {error}")))?;
+        let entry = StatEntry::Open(Entry {
+            id: req.id,
+            ts: timestamp,
+        });
+        if to_statista.send(entry).await.is_err() {
+            break;
         }
     }
+    Ok(())
 }
 
-pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>) {
+pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>) -> io::Result<()> {
     loop {
-        match transport.recv().await {
-            Ok(req) => {
-                let s = StatEntry::Close(req);
-                if to_statista.send(s).await.is_err() {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("transport error: recv failed: {e}");
-                break;
-            }
+        let response = transport
+            .recv()
+            .await
+            .map_err(|error| io::Error::new(error.kind(), format!("receive failed: {error}")))?;
+        if to_statista.send(StatEntry::Close(response)).await.is_err() {
+            return Ok(());
         }
     }
 }
@@ -132,7 +124,7 @@ mod tests {
             .unwrap();
         drop(req_tx);
 
-        transmitter(transport, req_rx, stat_tx).await;
+        transmitter(transport, req_rx, stat_tx).await.unwrap();
 
         let entry = stat_rx.recv().await.unwrap();
         match entry {
@@ -151,9 +143,7 @@ mod tests {
             ttl: Some(64),
         }]);
 
-        let handle = tokio::spawn(async move {
-            receiver(transport, stat_tx).await;
-        });
+        let handle = tokio::spawn(receiver(transport, stat_tx));
 
         let entry = tokio::time::timeout(std::time::Duration::from_millis(100), stat_rx.recv())
             .await
@@ -185,6 +175,7 @@ mod tests {
             transmitter(transport, req_rx, stat_tx),
         )
         .await
+        .unwrap()
         .unwrap();
     }
 
@@ -220,7 +211,7 @@ mod tests {
             .unwrap();
         drop(req_tx);
 
-        transmitter(transport, req_rx, stat_tx).await;
+        transmitter(transport, req_rx, stat_tx).await.unwrap();
 
         let mut ids = Vec::new();
         while let Some(entry) = stat_rx.recv().await {
@@ -247,7 +238,7 @@ mod tests {
             .unwrap();
         drop(req_tx);
 
-        transmitter(transport, req_rx, stat_tx).await;
+        transmitter(transport, req_rx, stat_tx).await.unwrap();
 
         let entry = stat_rx.recv().await.unwrap();
         match entry {
@@ -294,26 +285,37 @@ mod tests {
             transmitter(transport, req_rx, stat_tx),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .unwrap_err();
     }
 
     #[tokio::test]
     async fn receiver_exits_on_stat_channel_close() {
         let (stat_tx, mut stat_rx) = mpsc::channel(8);
-        let transport = MockTransport::new(vec![Response {
-            id: 0,
-            timestamp: Instant::now(),
-            size: 0,
-            ttl: None,
-        }]);
+        let transport = MockTransport::new(vec![
+            Response {
+                id: 0,
+                timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
+            },
+            Response {
+                id: 1,
+                timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
+            },
+        ]);
 
         let handle = tokio::spawn(receiver(transport, stat_tx));
 
         let _ = stat_rx.recv().await;
         drop(stat_rx);
 
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), handle)
+        tokio::time::timeout(std::time::Duration::from_millis(100), handle)
             .await
+            .unwrap()
+            .unwrap()
             .unwrap();
     }
 
@@ -327,7 +329,8 @@ mod tests {
             receiver(transport, stat_tx),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .unwrap_err();
     }
 
     #[tokio::test]
@@ -389,6 +392,7 @@ mod tests {
             transmitter(transport, req_rx, stat_tx),
         )
         .await
+        .unwrap()
         .unwrap();
     }
 }

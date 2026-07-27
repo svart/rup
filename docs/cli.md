@@ -135,6 +135,7 @@ The supported fields are:
 | `{seq}` | Sequence number |
 | `{rtt}` | RTT in milliseconds with three decimal places and the `ms` unit |
 | `{rtt_ms}` | RTT in milliseconds with three decimal places and no unit |
+| `{rtt_ms:.N}` | Unitless RTT with `N` decimal places, where `N` is 0 through 6 |
 | `{size}` | Response size in bytes |
 | `{ttl}` | TTL, or `-` when unavailable |
 | `{status}` | `reply` or `terminal_reply` |
@@ -142,8 +143,8 @@ The supported fields are:
 
 Use `{{` and `}}` for literal braces. Invalid fields, unmatched braces, and
 embedded newlines are rejected before the ping session starts. `--format`
-cannot be used with `--output jsonl`. Placeholder precision modifiers are not
-supported.
+cannot be used with `--output jsonl`. Precision is supported only for
+`{rtt_ms}`; for example, `{rtt_ms:.2}` renders two decimal places.
 
 Use `--output jsonl` for machine-readable output. The first line is a
 `rup.ping` metadata record with schema version 3. It is followed by `reply`,

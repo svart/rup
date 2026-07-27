@@ -4,13 +4,16 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
+const DEFAULT_RTT_MS_PRECISION: usize = 3;
+const MAX_RTT_MS_PRECISION: usize = 6;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Field {
     Target,
     Ip,
     Seq,
     Rtt,
-    RttMs,
+    RttMs { precision: usize },
     Size,
     Ttl,
     Status,
@@ -26,12 +29,31 @@ impl FromStr for Field {
             "ip" => Ok(Self::Ip),
             "seq" => Ok(Self::Seq),
             "rtt" => Ok(Self::Rtt),
-            "rtt_ms" => Ok(Self::RttMs),
+            "rtt_ms" => Ok(Self::RttMs {
+                precision: DEFAULT_RTT_MS_PRECISION,
+            }),
             "size" => Ok(Self::Size),
             "ttl" => Ok(Self::Ttl),
             "status" => Ok(Self::Status),
             "protocol" => Ok(Self::Protocol),
-            _ => Err(format!("unknown format field '{value}'")),
+            _ => {
+                if let Some(precision) = value.strip_prefix("rtt_ms:.") {
+                    if precision.len() != 1 || !precision.as_bytes()[0].is_ascii_digit() {
+                        return Err(
+                            "invalid rtt_ms precision; expected {rtt_ms:.N} with N from 0 to 6"
+                                .to_owned(),
+                        );
+                    }
+
+                    let precision = usize::from(precision.as_bytes()[0] - b'0');
+                    if precision > MAX_RTT_MS_PRECISION {
+                        return Err("rtt_ms precision must be between 0 and 6".to_owned());
+                    }
+                    return Ok(Self::RttMs { precision });
+                }
+
+                Err(format!("unknown format field '{value}'"))
+            }
         }
     }
 }
@@ -120,7 +142,9 @@ impl ReplyFormat {
                         output.push_str(&fmt_duration_ms_value(result.rtt));
                         output.push_str(" ms");
                     }
-                    Field::RttMs => output.push_str(&fmt_duration_ms_value(result.rtt)),
+                    Field::RttMs { precision } => output.push_str(
+                        &fmt_duration_ms_value_with_precision(result.rtt, *precision),
+                    ),
                     Field::Size => write_value(&mut output, result.size),
                     Field::Ttl => match result.ttl {
                         Some(ttl) => write_value(&mut output, ttl),
@@ -140,7 +164,15 @@ impl ReplyFormat {
 }
 
 pub(crate) fn fmt_duration_ms_value(duration: Duration) -> String {
-    format!("{:.3}", duration.as_secs_f64() * 1000.0)
+    fmt_duration_ms_value_with_precision(duration, DEFAULT_RTT_MS_PRECISION)
+}
+
+fn fmt_duration_ms_value_with_precision(duration: Duration, precision: usize) -> String {
+    format!(
+        "{:.precision$}",
+        duration.as_secs_f64() * 1000.0,
+        precision = precision
+    )
 }
 
 fn write_value(output: &mut String, value: impl fmt::Display) {
@@ -199,6 +231,30 @@ mod tests {
     }
 
     #[test]
+    fn renders_rtt_ms_with_precision_from_zero_through_six() {
+        let format: ReplyFormat =
+            "{rtt_ms}|{rtt_ms:.0}|{rtt_ms:.1}|{rtt_ms:.2}|{rtt_ms:.3}|{rtt_ms:.4}|{rtt_ms:.5}|{rtt_ms:.6}"
+                .parse()
+                .unwrap();
+        let result = PingResult {
+            seq: 1,
+            rtt: Duration::from_nanos(1_234_567),
+            size: 56,
+            ttl: Some(64),
+        };
+
+        assert_eq!(
+            format.render(
+                "example.test",
+                "192.0.2.1".parse().unwrap(),
+                Protocol::Icmp,
+                &result,
+            ),
+            "1.235|1|1.2|1.23|1.235|1.2346|1.23457|1.234567"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_placeholder() {
         let error = "{rtt_us}".parse::<ReplyFormat>().unwrap_err();
 
@@ -206,10 +262,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_precision_modifiers() {
-        let error = "{rtt_ms:.2}".parse::<ReplyFormat>().unwrap_err();
+    fn rejects_rtt_ms_precision_above_six() {
+        let error = "{rtt_ms:.7}".parse::<ReplyFormat>().unwrap_err();
 
-        assert!(error.contains("unknown format field 'rtt_ms:.2'"));
+        assert!(error.contains("precision must be between 0 and 6"));
+    }
+
+    #[test]
+    fn rejects_malformed_or_unsupported_format_modifiers() {
+        assert!("{rtt_ms:.}".parse::<ReplyFormat>().is_err());
+        assert!("{rtt_ms:.02}".parse::<ReplyFormat>().is_err());
+        assert!("{rtt_ms:2}".parse::<ReplyFormat>().is_err());
+        assert!("{rtt:.2}".parse::<ReplyFormat>().is_err());
+        assert!("{seq:.2}".parse::<ReplyFormat>().is_err());
     }
 
     #[test]

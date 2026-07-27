@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn cli_client_rejects_invalid_custom_reply_format() {
-        assert!(get_cli_params_from(["rup", "8.8.8.8", "--format", "{rtt_ms:.2}"]).is_err());
+        assert!(get_cli_params_from(["rup", "8.8.8.8", "--format", "{rtt_ms:.7}"]).is_err());
     }
 
     #[test]

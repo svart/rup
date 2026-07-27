@@ -1,11 +1,15 @@
-use std::time::Duration;
-use std::{cmp::Ordering, collections::VecDeque};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{Receiver, Sender, error::TryRecvError};
 use tokio::time::sleep;
 
-use crate::pinger::{Entry, Response, StatEntry};
+use crate::pinger::StatEntry;
 use crate::{PingEvent, PingResult};
+
+#[path = "statistics/tracker.rs"]
+mod tracker;
+
+use tracker::MeasurementTracker;
 
 pub(crate) fn loss_pct(sent: u64, received: u64) -> f64 {
     if sent > 0 {
@@ -69,105 +73,24 @@ impl StatSink {
     }
 }
 
-enum ResponseMatch {
-    Matched(PingResult),
-    ReorderOrLoss { seq: u64 },
-}
-
 async fn signal_generator(to_generator: &Option<Sender<()>>) {
     if let Some(gen_channel) = to_generator {
         let _ = gen_channel.send(()).await;
     }
 }
 
-async fn expire_timed_out(
-    requests: &mut VecDeque<Entry>,
-    wait_time: Duration,
-    to_generator: &Option<Sender<()>>,
-    sink: &StatSink,
-) {
-    while let Some(req) = requests.front() {
-        if req.ts.elapsed() < wait_time {
-            break;
-        }
-
-        let req = requests.pop_front().expect("front checked above");
-        sink.event(PingEvent::Timeout { seq: req.id }).await;
-        signal_generator(to_generator).await;
-    }
-}
-
-fn match_response(requests: &mut VecDeque<Entry>, response: Response) -> Vec<ResponseMatch> {
-    let mut matches = Vec::new();
-
-    while let Some(req) = requests.pop_front() {
-        match response.id.cmp(&req.id) {
-            Ordering::Greater => {
-                matches.push(ResponseMatch::ReorderOrLoss { seq: req.id });
-                continue;
-            }
-            Ordering::Equal => {
-                matches.push(ResponseMatch::Matched(PingResult {
-                    seq: response.id,
-                    rtt: response.timestamp.duration_since(req.ts),
-                    size: response.size,
-                    ttl: response.ttl,
-                }));
-            }
-            Ordering::Less => requests.push_front(req),
-        }
-        break;
-    }
-
-    matches
-}
-
-async fn handle_stat_entry(
-    entry: StatEntry,
-    requests: &mut VecDeque<Entry>,
-    pending_responses: &mut VecDeque<Response>,
-    rtts: &mut Vec<Duration>,
-    total_sent: &mut u64,
-    to_generator: &Option<Sender<()>>,
-    sink: &StatSink,
-) {
-    match entry {
-        StatEntry::Open(t) => {
-            *total_sent += 1;
-            requests.push_back(t);
-            while pending_responses
-                .front()
-                .is_some_and(|response| requests.back().is_some_and(|req| response.id <= req.id))
-            {
-                let response = pending_responses.pop_front().expect("front checked above");
-                handle_response(response, requests, rtts, to_generator, sink).await;
-            }
-        }
-        StatEntry::Close(t) => {
-            if requests.back().is_none_or(|req| t.id > req.id) {
-                pending_responses.push_back(t);
-            } else {
-                handle_response(t, requests, rtts, to_generator, sink).await;
-            }
-        }
-    }
-}
-
-async fn handle_response(
-    response: Response,
-    requests: &mut VecDeque<Entry>,
-    rtts: &mut Vec<Duration>,
-    to_generator: &Option<Sender<()>>,
-    sink: &StatSink,
-) {
-    for response_match in match_response(requests, response) {
-        match response_match {
-            ResponseMatch::Matched(result) => {
-                rtts.push(result.rtt);
+async fn emit_events(events: Vec<PingEvent>, to_generator: &Option<Sender<()>>, sink: &StatSink) {
+    for event in events {
+        match event {
+            PingEvent::Reply(result) => {
                 signal_generator(to_generator).await;
                 sink.reply(result).await;
             }
-            ResponseMatch::ReorderOrLoss { seq } => {
+            PingEvent::Timeout { seq } => {
+                signal_generator(to_generator).await;
+                sink.event(PingEvent::Timeout { seq }).await;
+            }
+            PingEvent::ReorderOrLoss { seq } => {
                 sink.event(PingEvent::ReorderOrLoss { seq }).await;
             }
         }
@@ -176,26 +99,14 @@ async fn handle_response(
 
 async fn drain_ready_stat_entries(
     from_transport: &mut Receiver<StatEntry>,
-    requests: &mut VecDeque<Entry>,
-    pending_responses: &mut VecDeque<Response>,
-    rtts: &mut Vec<Duration>,
-    total_sent: &mut u64,
+    tracker: &mut MeasurementTracker,
     to_generator: &Option<Sender<()>>,
     sink: &StatSink,
 ) -> bool {
     loop {
         match from_transport.try_recv() {
             Ok(entry) => {
-                handle_stat_entry(
-                    entry,
-                    requests,
-                    pending_responses,
-                    rtts,
-                    total_sent,
-                    to_generator,
-                    sink,
-                )
-                .await;
+                emit_events(tracker.ingest(entry), to_generator, sink).await;
             }
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => return true,
@@ -218,22 +129,16 @@ async fn run_statista_core(
     wait_time: Duration,
     sink: StatSink,
 ) -> crate::PingReport {
-    let mut requests = VecDeque::<Entry>::new();
-    let mut pending_responses = VecDeque::<Response>::new();
-    let mut rtts = Vec::new();
-    let mut total_sent = 0u64;
+    let mut tracker = MeasurementTracker::new();
     let mut input_closed = false;
     let mut no_more_sends = false;
 
     loop {
-        if (input_closed || no_more_sends) && requests.is_empty() {
+        if (input_closed || no_more_sends) && tracker.is_settled() {
             break;
         }
 
-        let timeout = requests
-            .front()
-            .map(|req| wait_time.saturating_sub(req.ts.elapsed()))
-            .unwrap_or(wait_time);
+        let timeout = tracker.next_timeout(Instant::now(), wait_time);
 
         tokio::select! {
             resp = from_transport.recv(), if !input_closed => {
@@ -242,40 +147,29 @@ async fn run_statista_core(
                     continue;
                 };
 
-                handle_stat_entry(
-                    resp,
-                    &mut requests,
-                    &mut pending_responses,
-                    &mut rtts,
-                    &mut total_sent,
-                    &to_generator,
-                    &sink,
-                ).await;
+                emit_events(tracker.ingest(resp), &to_generator, &sink).await;
             }
             _ = recv_send_done(&mut sends_done) => {
                 sends_done = None;
                 no_more_sends = true;
                 input_closed |= drain_ready_stat_entries(
                     &mut from_transport,
-                    &mut requests,
-                    &mut pending_responses,
-                    &mut rtts,
-                    &mut total_sent,
+                    &mut tracker,
                     &to_generator,
                     &sink,
                 ).await;
             }
-            _ = sleep(timeout), if !requests.is_empty() => {
-                expire_timed_out(&mut requests, wait_time, &to_generator, &sink).await;
+            _ = sleep(timeout.unwrap_or(wait_time)), if timeout.is_some() => {
+                emit_events(
+                    tracker.expire(Instant::now(), wait_time),
+                    &to_generator,
+                    &sink,
+                ).await;
             }
         }
     }
 
-    crate::PingReport {
-        sent: total_sent,
-        received: rtts.len() as u64,
-        rtts,
-    }
+    tracker.into_report()
 }
 
 pub async fn statista(
@@ -401,6 +295,7 @@ impl RttSequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinger::Entry;
     use std::time::Instant;
     use tokio::sync::mpsc;
 
@@ -528,120 +423,6 @@ mod tests {
         seq.set_total_sent(5);
         let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
         assert!((loss_pct - 100.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn entry_matching_exact_order() {
-        let mut requests = VecDeque::new();
-        let ts = Instant::now();
-        requests.push_back(Entry { id: 0, ts });
-        requests.push_back(Entry { id: 1, ts });
-
-        let mut matched = Vec::new();
-
-        let idx = 0;
-        while let Some(req) = requests.pop_front() {
-            match idx.cmp(&req.id) {
-                Ordering::Greater => continue,
-                Ordering::Equal => matched.push(idx),
-                Ordering::Less => {
-                    requests.push_front(req);
-                }
-            }
-            break;
-        }
-        assert_eq!(matched, vec![0]);
-
-        let idx = 1;
-        while let Some(req) = requests.pop_front() {
-            match idx.cmp(&req.id) {
-                Ordering::Greater => continue,
-                Ordering::Equal => matched.push(idx),
-                Ordering::Less => {
-                    requests.push_front(req);
-                }
-            }
-            break;
-        }
-        assert_eq!(matched, vec![0, 1]);
-        assert!(requests.is_empty());
-    }
-
-    #[test]
-    fn entry_matching_less_puts_back() {
-        let mut requests = VecDeque::new();
-        let ts = Instant::now();
-        requests.push_back(Entry { id: 5, ts });
-
-        let idx = 3;
-        while let Some(req) = requests.pop_front() {
-            match idx.cmp(&req.id) {
-                Ordering::Greater => continue,
-                Ordering::Equal => {}
-                Ordering::Less => {
-                    requests.push_front(req);
-                }
-            }
-            break;
-        }
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].id, 5);
-    }
-
-    #[test]
-    fn entry_matching_skips_lost_entries() {
-        let mut requests = VecDeque::new();
-        let ts = Instant::now();
-        requests.push_back(Entry { id: 0, ts });
-        requests.push_back(Entry { id: 1, ts });
-        requests.push_back(Entry { id: 2, ts });
-
-        let idx = 2;
-        let mut skipped = Vec::new();
-        while let Some(req) = requests.pop_front() {
-            match idx.cmp(&req.id) {
-                Ordering::Greater => {
-                    skipped.push(req.id);
-                    continue;
-                }
-                Ordering::Equal => {
-                    break;
-                }
-                Ordering::Less => {
-                    requests.push_front(req);
-                    break;
-                }
-            }
-        }
-        assert_eq!(skipped, vec![0, 1]);
-    }
-
-    #[test]
-    fn entry_matching_empty_queue() {
-        let mut requests: VecDeque<Entry> = VecDeque::new();
-        let _idx = 42u64;
-        let result = requests.pop_front();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn entry_matching_idempotent() {
-        let mut requests = VecDeque::new();
-        let ts = Instant::now();
-        requests.push_back(Entry { id: 5, ts });
-
-        let idx = 5;
-        while let Some(req) = requests.pop_front() {
-            match idx.cmp(&req.id) {
-                Ordering::Greater => continue,
-                Ordering::Equal => {}
-                Ordering::Less => {
-                    requests.push_front(req);
-                }
-            }
-            break;
-        }
-        assert!(requests.is_empty());
     }
 
     #[tokio::test]

@@ -187,12 +187,15 @@ fn absolute_timestamp_ms(started_at_ms: u64, elapsed: Duration) -> u64 {
     started_at_ms.saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }
 
-fn unix_timestamp_ms() -> u64 {
+fn unix_timestamp_ms() -> io::Result<u64> {
     let milliseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
+        .map_err(|error| {
+            io::Error::other(format!("system clock is before the Unix epoch: {error}"))
+        })?
         .as_millis();
-    u64::try_from(milliseconds).expect("system time does not fit into milliseconds")
+    u64::try_from(milliseconds)
+        .map_err(|_| io::Error::other("system time does not fit into milliseconds"))
 }
 
 pub(crate) fn run() -> std::process::ExitCode {
@@ -259,7 +262,7 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
         config = config.run_time(run_time);
     }
 
-    let started_at_ms = unix_timestamp_ms();
+    let started_at_ms = unix_timestamp_ms()?;
     let started = Instant::now();
     match params.output {
         OutputFormat::Human => println!("{}", header_line(&ctx)),

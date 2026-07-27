@@ -51,17 +51,23 @@ rup = { git = "https://github.com/svart/rup" }
 ```
 
 ```rust
-use rup::{Pinger, Protocol};
+use std::time::Duration;
+use rup::{Pinger, Protocol, TrafficClass};
 
 # async fn example() -> std::io::Result<()> {
 let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
     .count(5)
-    .tos(184)
-    .interval(1000)
+    .traffic_class(TrafficClass::new(184))
+    .interval(Duration::from_secs(1))
     .run()
     .await?;
 
-println!("sent={}, received={}, loss={:.0}%", report.sent, report.received, report.loss_pct());
+println!(
+    "sent={}, received={}, loss={:.0}%",
+    report.sent(),
+    report.received(),
+    report.loss_pct(),
+);
 # Ok(())
 # }
 ```

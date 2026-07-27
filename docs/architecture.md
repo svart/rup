@@ -3,11 +3,11 @@
 The client path is an actor-style Tokio pipeline:
 
 ```text
-generator --Request--> transmitter --StatEntry::Open--> statista --PingEvent--> caller
-                         |                                  ^
-                   send()|                            recv()|
-                         v                                  |
-                    Transport ----------- StatEntry::Close --
+generator --Request--> transmitter --sent--> tracker --PingEvent--> caller
+                         |                    ^
+                   send()|              recv()|
+                         v                    |
+                    Transport --received------
 ```
 
 ## Pipeline
@@ -16,8 +16,10 @@ generator --Request--> transmitter --StatEntry::Open--> statista --PingEvent--> 
 2. `transmitter` calls `Transport::send()`, records the send timestamp, and
    forwards `StatEntry::Open`.
 3. `receiver` calls `Transport::recv()` and forwards `StatEntry::Close`.
-4. `statista` matches open and close entries by ID, computes RTTs, tracks
-   timeouts, and emits structured `PingEvent` values for live sessions.
+4. The statistics actor passes entries to a synchronous measurement tracker,
+   which matches IDs, computes RTTs, tracks timeouts, and returns structured
+   `PingEvent` values. Tokio-specific channel and timer work stays outside the
+   deterministic tracker.
 5. Callers consume `PingSession::next()` and decide how to present or process
    events. The CLI can render the same event stream as human-readable text or
    versioned JSON Lines. Completed sessions return a `PingReport`.
@@ -77,7 +79,7 @@ and embeds the same echo payload after it.
 
 ## Packet Format
 
-UDP/TCP packets contain the bincode-serialized `Echo` payload plus optional zero
+UDP/TCP packets contain a fixed-width little-endian header plus optional zero
 padding:
 
 ```text
@@ -90,8 +92,9 @@ ICMP packets wrap that payload:
 [ICMP header: 8 bytes] [Echo payload: 12 bytes minimum] [padding...]
 ```
 
-`PING_HDR_LEN` is 12 because it is the wire size of `Echo`, not
-`size_of::<Echo>()`.
+The header is 12 bytes: eight bytes for the sequence ID and two bytes each for
+request and response lengths. Encoding is manual and does not depend on Rust
+struct layout.
 
 ## Adding A Protocol
 
@@ -99,6 +102,6 @@ ICMP packets wrap that payload:
 2. Implement `Transport` for the client transport.
 3. Register the module in `src/transport/mod.rs`.
 4. Add a `Protocol` variant and parser/display support in `src/protocol.rs`.
-5. Register client construction in `src/lib.rs`.
+5. Register client construction in `src/session.rs`.
 6. Register server support if the protocol needs a `rup` echo server.
 7. Add parser, packet, transport, and high-level session tests.

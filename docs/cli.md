@@ -33,7 +33,7 @@ rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 | `--request-size <bytes>` | Request packet size, minimum 12 bytes |
 | `--response-size <bytes>` | Response packet size, minimum 12 bytes |
 | `--tos <0-255>` | Outgoing IP TOS / IPv6 traffic class byte |
-| `--local-address <addr>` | Local bind address [default: `0.0.0.0:0`] |
+| `--local-address <addr>` | Local bind address [default: unspecified address matching the remote IP family] |
 | `--output <human|jsonl>` | Output format [default: `human`] |
 | `--format <template>` | Customize each human-readable reply line |
 

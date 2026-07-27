@@ -15,15 +15,18 @@ The project is a single crate with two targets:
 
 | File | Target | Purpose |
 |------|--------|---------|
-| `src/lib.rs` | lib | Module declarations, re-exports, `Pinger`/`PingReport` high-level API, `has_port`/`ensure_port` helpers |
-| `src/main.rs` | bin | Entry point, task wiring, DNS resolution, protocol dispatch |
+| `src/lib.rs` | lib | Module declarations and intentional public re-exports |
+| `src/session.rs` | lib | High-level API, task supervision, reports, address helpers, server dispatch |
+| `src/main.rs` | bin | Minimal process entry point |
+| `src/app.rs` | bin | Runtime, DNS resolution, session wiring, and output |
 | `src/cli.rs` | bin | CLAP argument definitions and parsing |
 | `src/pinger.rs` | lib | Domain types (`Request`, `Response`, `Entry`, `StatEntry`, `Echo`, `SendMode`) + `generator` task |
-| `src/statistics.rs` | lib | `statista`/`statista_with_collector`, live event emission, timeout handling, `RttSequence` stats |
+| `src/statistics.rs` | lib | Statistics actor, live event emission, and aggregate functions |
+| `src/statistics/tracker.rs` | lib | Deterministic matching and timeout state |
 | `src/transport/mod.rs` | lib | `Transport` trait + `transmitter()`/`receiver()` adapter functions |
-| `src/transport/async_udp.rs` | lib | `UdpClientTransport` + UDP echo server |
-| `src/transport/async_tcp.rs` | lib | `TcpClientTransport` + TCP echo server |
-| `src/transport/async_icmp.rs` | lib | `IcmpClientTransport` (Linux ping socket, no root needed) |
+| `src/transport/async_udp.rs` | lib | `UdpTransport` implementation + UDP echo server |
+| `src/transport/async_tcp.rs` | lib | `TcpTransport` implementation + TCP echo server |
+| `src/transport/async_icmp.rs` | lib | `IcmpTransport` implementation (Linux ping socket, no root needed) |
 
 ## Library public API
 
@@ -41,7 +44,7 @@ use rup::{Pinger, Protocol};
 
 let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
     .count(5)
-    .interval(1000)
+    .interval(std::time::Duration::from_secs(1))
     .run()
     .await?;
 
@@ -50,17 +53,12 @@ println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max
 
 ### Raw building blocks (custom pipelines)
 
-All core types are publicly accessible:
+The public low-level surface is intentionally small:
 
 - `rup::Transport` trait — implement for custom protocols
-- `rup::UdpClientTransport`, `rup::TcpClientTransport`, `rup::IcmpClientTransport`
-- `rup::transmitter()`, `rup::receiver()` — adapter functions for Transport
-- `rup::generator()` — produces `Request` messages
-- `rup::statista()` / `rup::statista_with_collector()` — RTT matching
-- `rup::Request`, `rup::Response`, `rup::Entry`, `rup::StatEntry`, `rup::SendMode`
-- `rup::Echo`, `rup::PING_HDR_LEN` — wire protocol types
+- `rup::UdpTransport`, `rup::TcpTransport`, `rup::IcmpTransport`
+- `rup::Request`, `rup::Response`, `rup::PacketSize`
 - `rup::PingSession`, `rup::PingEvent` — consume live ping results with `next().await`
-- `rup::RttSequence` — compute min/med/avg/std_dev statistics
 - `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
 - `rup::PingResult` — individual RTT measurement `{seq, rtt, size, ttl}`
 - `rup::has_port()`, `rup::ensure_port()` — address helpers
@@ -149,7 +147,8 @@ payload from the datagram buffer.
 ```
 [ICMP header (8)] [Echo struct (12+)]
 ```
-Where `Echo` is bincode-serialized: `{id: u64, len: u16, resp_size: u16}`.
+The echo header is manually encoded in little-endian field order:
+`{id: u64, len: u16, resp_size: u16}`.
 `PING_HDR_LEN = 12` (sum of field sizes, not `size_of::<Echo>()` which is 16
 due to alignment padding).
 

@@ -7,17 +7,21 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 
 | File | Purpose |
 |------|---------|
-| `src/lib.rs` | Public API, `Pinger`, `PingConfig`, session orchestration, server dispatch |
+| `src/lib.rs` | Module declarations and intentional public re-exports |
+| `src/session.rs` | Public session/config/report API, task supervision, server dispatch |
 | `src/protocol.rs` | `Protocol` enum, parsing, display names, CLI value list |
 | `src/echo_codec.rs` | Shared UDP/TCP echo payload encoding and decoding |
 | `src/pinger.rs` | Request/response domain types, `Echo`, `SendMode`, request generator |
 | `src/statistics.rs` | RTT matching, timeout handling, live event emission, shared statistics helpers |
+| `src/statistics/tracker.rs` | Deterministic request/response matching and timeout state |
+| `src/unix.rs` | Reviewed unsafe boundary for ancillary data and socket-address decoding |
 | `src/transport/mod.rs` | `Transport` trait plus transmitter/receiver adapters |
 | `src/transport/async_udp.rs` | UDP client transport and UDP echo server |
 | `src/transport/async_tcp.rs` | TCP client transport and TCP echo server |
 | `src/transport/async_icmp.rs` | ICMP client transport using Linux ping sockets |
 | `src/cli.rs` | Clap command definition and CLI parameter extraction |
-| `src/main.rs` | Runtime setup and calls into library entry points |
+| `src/app.rs` | Runtime setup, DNS resolution, session orchestration, and output |
+| `src/main.rs` | Binary module wiring and process entry point |
 
 ## Testing
 
@@ -27,10 +31,10 @@ Run the normal validation set before committing:
 
 ```sh
 cargo test
+cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
+cargo doc --no-deps
 ```
-
-Current suite size is 145 library tests, 22 binary tests, and 1 doctest.
 
 | File | What the tests cover |
 |------|----------------------|
@@ -41,7 +45,8 @@ Current suite size is 145 library tests, 22 binary tests, and 1 doctest.
 | `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
 | `src/transport/async_icmp.rs` | ICMP packet assembly, checksums, response parsing, loopback ping when available |
 | `src/cli.rs` | CLI defaults, validation, protocol parsing, server subcommand arguments |
-| `src/lib.rs` | Address helpers, high-level report statistics, session orchestration |
+| `src/session.rs` | Address helpers, report statistics, task failures, and session orchestration |
+| `tests/` | Public API compilation and CLI process behavior |
 
 Some tests bind loopback sockets. In restricted sandboxes they may fail with
 `PermissionDenied`; run them outside the sandbox when validating real socket

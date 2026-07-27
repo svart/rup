@@ -95,27 +95,15 @@ fn recv_socket_error(socket: &UdpSocket, payload: &mut [u8]) -> io::Result<Optio
 
 #[cfg(target_os = "linux")]
 unsafe fn extended_error_origin(msg: &libc::msghdr) -> Option<u8> {
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
-    while !cmsg.is_null() {
-        let level = unsafe { (*cmsg).cmsg_level };
-        let kind = unsafe { (*cmsg).cmsg_type };
-        if (level == libc::IPPROTO_IP && kind == libc::IP_RECVERR)
-            || (level == libc::IPPROTO_IPV6 && kind == libc::IPV6_RECVERR)
-        {
-            let data_len = unsafe { (*cmsg).cmsg_len as usize }
-                .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
-            if data_len >= std::mem::size_of::<libc::sock_extended_err>() {
-                let error = unsafe {
-                    std::ptr::read_unaligned(
-                        libc::CMSG_DATA(cmsg).cast::<libc::sock_extended_err>(),
-                    )
-                };
-                return Some(error.ee_origin);
-            }
-        }
-        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
-    }
-    None
+    let data = unsafe {
+        crate::unix::control_message_data(msg, libc::IPPROTO_IP, libc::IP_RECVERR).or_else(|| {
+            crate::unix::control_message_data(msg, libc::IPPROTO_IPV6, libc::IPV6_RECVERR)
+        })
+    }?;
+    (data.len() >= std::mem::size_of::<libc::sock_extended_err>()).then(|| {
+        unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<libc::sock_extended_err>()) }
+            .ee_origin
+    })
 }
 
 pub async fn server_transport_until(

@@ -243,7 +243,6 @@ async fn recv_from_with_ttl(
     buf: &mut [u8],
 ) -> io::Result<(usize, SocketAddr, Option<u8>)> {
     use std::mem;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
     use std::os::fd::AsRawFd;
 
     use tokio::io::Interest;
@@ -272,36 +271,7 @@ async fn recv_from_with_ttl(
                 return Err(io::Error::last_os_error());
             }
 
-            let addr = match storage.ss_family as libc::c_int {
-                libc::AF_INET
-                    if msg.msg_namelen as usize >= mem::size_of::<libc::sockaddr_in>() =>
-                {
-                    let addr =
-                        unsafe { *(std::ptr::addr_of!(storage).cast::<libc::sockaddr_in>()) };
-                    SocketAddr::V4(SocketAddrV4::new(
-                        Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
-                        u16::from_be(addr.sin_port),
-                    ))
-                }
-                libc::AF_INET6
-                    if msg.msg_namelen as usize >= mem::size_of::<libc::sockaddr_in6>() =>
-                {
-                    let addr =
-                        unsafe { *(std::ptr::addr_of!(storage).cast::<libc::sockaddr_in6>()) };
-                    SocketAddr::V6(SocketAddrV6::new(
-                        Ipv6Addr::from(addr.sin6_addr.s6_addr),
-                        u16::from_be(addr.sin6_port),
-                        addr.sin6_flowinfo,
-                        addr.sin6_scope_id,
-                    ))
-                }
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "recvmsg returned an unsupported socket address",
-                    ));
-                }
-            };
+            let addr = crate::unix::socket_address(&storage, msg.msg_namelen)?;
 
             let ttl = unsafe { parse_ttl_cmsg(&msg) };
             Ok((n as usize, addr, ttl))
@@ -324,26 +294,18 @@ async fn recv_from_with_ttl(
 
 #[cfg(unix)]
 unsafe fn parse_ttl_cmsg(msg: &libc::msghdr) -> Option<u8> {
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
-    while !cmsg.is_null() {
-        let level = unsafe { (*cmsg).cmsg_level };
-        let ty = unsafe { (*cmsg).cmsg_type };
-        if (level == libc::IPPROTO_IP && (ty == libc::IP_TTL || ty == libc::IP_RECVTTL))
-            || (level == libc::IPPROTO_IPV6 && ty == libc::IPV6_HOPLIMIT)
-        {
-            let data = unsafe { libc::CMSG_DATA(cmsg) };
-            let data_len = unsafe { (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize };
-            if data_len >= std::mem::size_of::<libc::c_int>() {
-                let value = unsafe { std::ptr::read_unaligned(data.cast::<libc::c_int>()) };
-                return u8::try_from(value).ok();
-            }
-            if data_len >= 1 {
-                return Some(unsafe { *data });
-            }
-        }
-        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+    let data = unsafe {
+        crate::unix::control_message_data(msg, libc::IPPROTO_IP, libc::IP_TTL)
+            .or_else(|| crate::unix::control_message_data(msg, libc::IPPROTO_IP, libc::IP_RECVTTL))
+            .or_else(|| {
+                crate::unix::control_message_data(msg, libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT)
+            })
+    }?;
+    if data.len() >= std::mem::size_of::<libc::c_int>() {
+        let value = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<libc::c_int>()) };
+        return u8::try_from(value).ok();
     }
-    None
+    data.first().copied()
 }
 
 fn csum16_add(x: u16, y: u16) -> u16 {

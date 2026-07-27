@@ -68,7 +68,7 @@ pub async fn recv_from_with_tos(
                 return Err(io::Error::last_os_error());
             }
 
-            let addr = socket_addr_from_storage(&storage, msg.msg_namelen)?;
+            let addr = crate::unix::socket_address(&storage, msg.msg_namelen)?;
             let tos = unsafe { parse_tos_cmsg(&msg) };
             Ok((n as usize, addr, tos))
         }) {
@@ -89,57 +89,15 @@ pub async fn recv_from_with_tos(
 }
 
 #[cfg(unix)]
-fn socket_addr_from_storage(
-    storage: &libc::sockaddr_storage,
-    len: libc::socklen_t,
-) -> io::Result<SocketAddr> {
-    use std::mem;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-
-    match storage.ss_family as libc::c_int {
-        libc::AF_INET if len as usize >= mem::size_of::<libc::sockaddr_in>() => {
-            let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in) };
-            Ok(SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
-                u16::from_be(addr.sin_port),
-            )))
-        }
-        libc::AF_INET6 if len as usize >= mem::size_of::<libc::sockaddr_in6>() => {
-            let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in6) };
-            Ok(SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::from(addr.sin6_addr.s6_addr),
-                u16::from_be(addr.sin6_port),
-                addr.sin6_flowinfo,
-                addr.sin6_scope_id,
-            )))
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "recvmsg returned an unsupported socket address",
-        )),
-    }
-}
-
-#[cfg(unix)]
 unsafe fn parse_tos_cmsg(msg: &libc::msghdr) -> Option<TrafficClass> {
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
-    while !cmsg.is_null() {
-        let level = unsafe { (*cmsg).cmsg_level };
-        let ty = unsafe { (*cmsg).cmsg_type };
-        if (level == libc::IPPROTO_IP && ty == libc::IP_TOS)
-            || (level == libc::IPPROTO_IPV6 && ty == libc::IPV6_TCLASS)
-        {
-            let data = unsafe { libc::CMSG_DATA(cmsg) };
-            let data_len = unsafe { (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize };
-            if data_len >= std::mem::size_of::<libc::c_int>() {
-                let value = unsafe { std::ptr::read_unaligned(data.cast::<libc::c_int>()) };
-                return Some(TrafficClass::new(value as u8));
-            }
-            if data_len >= 1 {
-                return Some(TrafficClass::new(unsafe { *data }));
-            }
-        }
-        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+    let data = unsafe {
+        crate::unix::control_message_data(msg, libc::IPPROTO_IP, libc::IP_TOS).or_else(|| {
+            crate::unix::control_message_data(msg, libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        })
+    }?;
+    if data.len() >= std::mem::size_of::<libc::c_int>() {
+        let value = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<libc::c_int>()) };
+        return Some(TrafficClass::new(value as u8));
     }
-    None
+    data.first().copied().map(TrafficClass::new)
 }

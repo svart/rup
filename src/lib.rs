@@ -5,6 +5,7 @@ mod session;
 mod statistics;
 mod tos;
 mod transport;
+mod unix;
 
 pub use pinger::{PacketSize, PacketSizeError, Request, Response};
 pub use protocol::Protocol;

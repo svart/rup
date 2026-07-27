@@ -97,9 +97,9 @@ pub enum PingEvent {
 /// Summary report from a completed ping session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingReport {
-    pub rtts: Vec<Duration>,
-    pub sent: u64,
-    pub received: u64,
+    pub(crate) rtts: Vec<Duration>,
+    pub(crate) sent: u64,
+    pub(crate) received: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +116,26 @@ impl TrafficClass {
 }
 
 impl PingReport {
+    pub fn from_rtts(sent: u64, rtts: Vec<Duration>) -> Self {
+        Self {
+            received: rtts.len() as u64,
+            sent,
+            rtts,
+        }
+    }
+
+    pub fn sent(&self) -> u64 {
+        self.sent
+    }
+
+    pub fn received(&self) -> u64 {
+        self.received
+    }
+
+    pub fn rtts(&self) -> &[Duration] {
+        &self.rtts
+    }
+
     pub fn loss_pct(&self) -> f64 {
         statistics::loss_pct(self.sent, self.received)
     }
@@ -194,7 +214,7 @@ impl PingSession {
 /// # async fn example() -> std::io::Result<()> {
 /// let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
 ///     .count(5)
-///     .interval(1000)
+///     .interval(std::time::Duration::from_secs(1))
 ///     .run()
 ///     .await?;
 /// println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max());
@@ -213,47 +233,47 @@ impl Pinger {
     }
 
     pub fn count(mut self, n: u64) -> Self {
-        self.config.ping_number = Some(n);
+        self.config = self.config.count(n);
         self
     }
 
-    pub fn interval(mut self, ms: u64) -> Self {
-        self.config.interval = Duration::from_millis(ms);
+    pub fn interval(mut self, interval: Duration) -> Self {
+        self.config = self.config.interval(interval);
         self
     }
 
     pub fn adaptive(mut self) -> Self {
-        self.config.adaptive = true;
+        self.config = self.config.adaptive();
         self
     }
 
-    pub fn wait_time(mut self, ms: u64) -> Self {
-        self.config.wait_time = Duration::from_millis(ms);
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.config = self.config.timeout(timeout);
         self
     }
 
     pub fn request_size(mut self, size: PacketSize) -> Self {
-        self.config.request_size = Some(size);
+        self.config = self.config.request_size(size);
         self
     }
 
     pub fn response_size(mut self, size: PacketSize) -> Self {
-        self.config.response_size = Some(size);
+        self.config = self.config.response_size(size);
         self
     }
 
-    pub fn tos(mut self, tos: u8) -> Self {
-        self.config.tos = Some(TrafficClass::new(tos));
+    pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
+        self.config = self.config.traffic_class(traffic_class);
         self
     }
 
     pub fn local(mut self, addr: SocketAddr) -> Self {
-        self.config.local = addr;
+        self.config = self.config.local_address(addr);
         self
     }
 
     pub fn run_time(mut self, dur: Duration) -> Self {
-        self.config.run_time = Some(dur);
+        self.config = self.config.run_time(dur);
         self
     }
 
@@ -264,17 +284,17 @@ impl Pinger {
 
 #[derive(Clone, Debug)]
 pub struct PingConfig {
-    pub remote: SocketAddr,
-    pub local: SocketAddr,
-    pub protocol: Protocol,
-    pub interval: Duration,
-    pub adaptive: bool,
-    pub wait_time: Duration,
-    pub request_size: Option<PacketSize>,
-    pub response_size: Option<PacketSize>,
-    pub tos: Option<TrafficClass>,
-    pub ping_number: Option<u64>,
-    pub run_time: Option<Duration>,
+    remote: SocketAddr,
+    local: SocketAddr,
+    protocol: Protocol,
+    interval: Duration,
+    adaptive: bool,
+    timeout: Duration,
+    request_size: Option<PacketSize>,
+    response_size: Option<PacketSize>,
+    traffic_class: Option<TrafficClass>,
+    count: Option<u64>,
+    run_time: Option<Duration>,
 }
 
 impl PingConfig {
@@ -285,13 +305,58 @@ impl PingConfig {
             protocol,
             interval: Duration::from_millis(1000),
             adaptive: false,
-            wait_time: Duration::from_millis(1000),
+            timeout: Duration::from_millis(1000),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: None,
+            traffic_class: None,
+            count: None,
             run_time: None,
         }
+    }
+
+    pub fn local_address(mut self, address: SocketAddr) -> Self {
+        self.local = address;
+        self
+    }
+
+    pub fn interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    pub fn adaptive(mut self) -> Self {
+        self.adaptive = true;
+        self
+    }
+
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn request_size(mut self, size: PacketSize) -> Self {
+        self.request_size = Some(size);
+        self
+    }
+
+    pub fn response_size(mut self, size: PacketSize) -> Self {
+        self.response_size = Some(size);
+        self
+    }
+
+    pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
+        self.traffic_class = Some(traffic_class);
+        self
+    }
+
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    pub fn run_time(mut self, duration: Duration) -> Self {
+        self.run_time = Some(duration);
+        self
     }
 }
 
@@ -323,22 +388,24 @@ async fn spawn_ping_session(
     match config.protocol {
         Protocol::Udp => {
             let transport =
-                UdpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
+                UdpClientTransport::new_with_tos(config.local, remote_addr, config.traffic_class)
+                    .await?;
             Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
         Protocol::Tcp => {
             let transport = TcpClientTransport::connect_or_probe(
                 config.local,
                 remote_addr,
-                config.tos,
-                config.wait_time,
+                config.traffic_class,
+                config.timeout,
             )
             .await?;
             Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
         Protocol::Icmp => {
             let transport =
-                IcmpClientTransport::new_with_tos(config.local, remote_addr, config.tos).await?;
+                IcmpClientTransport::new_with_tos(config.local, remote_addr, config.traffic_class)
+                    .await?;
             Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
     }
@@ -402,7 +469,7 @@ where
     T: Transport + Clone + Send + 'static,
 {
     let channels = SessionChannels::new();
-    let expected_requests = config.ping_number;
+    let expected_requests = config.count;
 
     let (send_mode, txtr_gen) = if config.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(CHANNEL_CAP);
@@ -433,7 +500,7 @@ where
 
     let generator_config = pinger::GeneratorConfig {
         send_mode,
-        ping_number: config.ping_number,
+        ping_number: config.count,
         run_time: config.run_time,
         request_size: config.request_size,
         response_size: config.response_size,
@@ -458,7 +525,7 @@ where
                     channels.statista_input,
                     sends_done_recv,
                     txtr_gen,
-                    config.wait_time,
+                    config.timeout,
                     events,
                 )
                 .await,
@@ -471,7 +538,7 @@ where
                     channels.statista_input,
                     sends_done_recv,
                     txtr_gen,
-                    config.wait_time,
+                    config.timeout,
                 )
                 .await,
             )
@@ -874,11 +941,11 @@ mod tests {
             protocol: Protocol::Udp,
             interval: Duration::from_millis(1),
             adaptive: false,
-            wait_time: Duration::from_millis(100),
+            timeout: Duration::from_millis(100),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: Some(3),
+            traffic_class: None,
+            count: Some(3),
             run_time: None,
         })
         .await
@@ -907,11 +974,11 @@ mod tests {
             protocol: Protocol::Udp,
             interval: Duration::from_millis(1),
             adaptive: false,
-            wait_time: Duration::from_millis(5),
+            timeout: Duration::from_millis(5),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: Some(1),
+            traffic_class: None,
+            count: Some(1),
             run_time: None,
         })
         .await
@@ -938,11 +1005,11 @@ mod tests {
             protocol: Protocol::Udp,
             interval: Duration::from_millis(1),
             adaptive: false,
-            wait_time: Duration::from_millis(100),
+            timeout: Duration::from_millis(100),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: Some(1),
+            traffic_class: None,
+            count: Some(1),
             run_time: None,
         })
         .await
@@ -981,11 +1048,11 @@ mod tests {
             protocol: Protocol::Tcp,
             interval: Duration::from_millis(1),
             adaptive: false,
-            wait_time: Duration::from_millis(100),
+            timeout: Duration::from_millis(100),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: Some(2),
+            traffic_class: None,
+            count: Some(2),
             run_time: None,
         })
         .await
@@ -1010,11 +1077,11 @@ mod tests {
             protocol: Protocol::Tcp,
             interval: Duration::from_millis(1),
             adaptive: true,
-            wait_time: Duration::from_millis(100),
+            timeout: Duration::from_millis(100),
             request_size: None,
             response_size: None,
-            tos: None,
-            ping_number: Some(2),
+            traffic_class: None,
+            count: Some(2),
             run_time: None,
         })
         .await
@@ -1035,11 +1102,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(100),
+                timeout: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(3),
+                traffic_class: None,
+                count: Some(3),
                 run_time: None,
             },
             None,
@@ -1062,11 +1129,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(1),
+                timeout: Duration::from_millis(1),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(1),
+                traffic_class: None,
+                count: Some(1),
                 run_time: None,
             },
             None,
@@ -1087,11 +1154,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(1),
+                timeout: Duration::from_millis(1),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(1),
+                traffic_class: None,
+                count: Some(1),
                 run_time: None,
             },
             None,
@@ -1115,11 +1182,11 @@ mod tests {
                     protocol: Protocol::Udp,
                     interval: Duration::from_millis(1000),
                     adaptive: true,
-                    wait_time: Duration::from_millis(100),
+                    timeout: Duration::from_millis(100),
                     request_size: None,
                     response_size: None,
-                    tos: None,
-                    ping_number: Some(count),
+                    traffic_class: None,
+                    count: Some(count),
                     run_time: None,
                 },
                 None,
@@ -1144,11 +1211,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(2),
+                timeout: Duration::from_millis(2),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(2),
+                traffic_class: None,
+                count: Some(2),
                 run_time: None,
             },
             None,
@@ -1171,11 +1238,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(100),
+                timeout: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(1),
+                traffic_class: None,
+                count: Some(1),
                 run_time: None,
             },
             None,
@@ -1200,11 +1267,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time,
+                timeout: wait_time,
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(1),
+                traffic_class: None,
+                count: Some(1),
                 run_time: None,
             },
             None,
@@ -1229,11 +1296,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(10),
                 adaptive: false,
-                wait_time,
+                timeout: wait_time,
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(10),
+                traffic_class: None,
+                count: Some(10),
                 run_time: None,
             },
             None,
@@ -1257,11 +1324,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1000),
                 adaptive: true,
-                wait_time: Duration::from_millis(100),
+                timeout: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(3),
+                traffic_class: None,
+                count: Some(3),
                 run_time: None,
             },
             None,
@@ -1283,11 +1350,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(100),
+                timeout: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(2),
+                traffic_class: None,
+                count: Some(2),
                 run_time: None,
             },
         );
@@ -1321,11 +1388,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_secs(1),
                 adaptive: false,
-                wait_time: Duration::from_millis(100),
+                timeout: Duration::from_millis(100),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: None,
+                traffic_class: None,
+                count: None,
                 run_time: None,
             },
         );
@@ -1358,11 +1425,11 @@ mod tests {
                 protocol: Protocol::Udp,
                 interval: Duration::from_millis(10),
                 adaptive: false,
-                wait_time: Duration::from_millis(120),
+                timeout: Duration::from_millis(120),
                 request_size: None,
                 response_size: None,
-                tos: None,
-                ping_number: Some(10),
+                traffic_class: None,
+                count: Some(10),
                 run_time: None,
             },
         );

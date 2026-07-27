@@ -81,11 +81,7 @@ impl MeasurementTracker {
     }
 
     pub(super) fn into_report(self) -> PingReport {
-        PingReport {
-            received: self.rtts.len() as u64,
-            sent: self.sent,
-            rtts: self.rtts,
-        }
+        PingReport::from_rtts(self.sent, self.rtts)
     }
 
     fn match_response(&mut self, response: Response) -> Vec<PingEvent> {

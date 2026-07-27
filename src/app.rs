@@ -99,8 +99,8 @@ fn reply_line(ctx: &OutputContext, result: &PingResult, format: Option<&ReplyFor
 fn packet_loss_line(report: &PingReport, elapsed: Duration) -> String {
     format!(
         "{} packets transmitted, {} received, {:.0}% packet loss, time {}ms",
-        report.sent,
-        report.received,
+        report.sent(),
+        report.received(),
         report.loss_pct(),
         elapsed.as_millis()
     )
@@ -171,8 +171,8 @@ fn jsonl_summary(report: &PingReport, elapsed: Duration, started_at_ms: u64) -> 
     serde_json::to_string(&json!({
         "record": "summary",
         "timestamp_ms": absolute_timestamp_ms(started_at_ms, elapsed),
-        "sent": report.sent,
-        "received": report.received,
+        "sent": report.sent(),
+        "received": report.received(),
         "loss_percent": report.loss_pct(),
         "rtt_min_ms": report.min().map(duration_ms),
         "rtt_mean_ms": report.mean().map(duration_ms),
@@ -236,17 +236,28 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
     };
 
     let mut config = PingConfig::new(target.address, params.protocol);
+    config = config.interval(params.interval).timeout(params.wait_time);
     if let Some(local_address) = params.local_address {
-        config.local = local_address;
+        config = config.local_address(local_address);
     }
-    config.interval = params.interval;
-    config.adaptive = params.adaptive;
-    config.wait_time = params.wait_time;
-    config.request_size = params.request_size;
-    config.response_size = params.response_size;
-    config.tos = params.tos;
-    config.ping_number = params.ping_number;
-    config.run_time = params.run_time;
+    if params.adaptive {
+        config = config.adaptive();
+    }
+    if let Some(size) = params.request_size {
+        config = config.request_size(size);
+    }
+    if let Some(size) = params.response_size {
+        config = config.response_size(size);
+    }
+    if let Some(traffic_class) = params.tos {
+        config = config.traffic_class(traffic_class);
+    }
+    if let Some(count) = params.ping_number {
+        config = config.count(count);
+    }
+    if let Some(run_time) = params.run_time {
+        config = config.run_time(run_time);
+    }
 
     let started_at_ms = unix_timestamp_ms();
     let started = Instant::now();
@@ -329,11 +340,10 @@ mod tests {
             size: 56,
             ttl: Some(64),
         };
-        let report = PingReport {
-            rtts: vec![Duration::from_micros(39), Duration::from_micros(42)],
-            sent: 3,
-            received: 2,
-        };
+        let report = PingReport::from_rtts(
+            3,
+            vec![Duration::from_micros(39), Duration::from_micros(42)],
+        );
 
         let records = [
             jsonl_metadata(&ctx, Duration::from_millis(100), false, 1_700_000_000_000),
@@ -486,11 +496,10 @@ mod tests {
 
     #[test]
     fn packet_loss_and_rtt_lines_match_ping_shape() {
-        let report = PingReport {
-            rtts: vec![Duration::from_micros(39), Duration::from_micros(42)],
-            sent: 2,
-            received: 2,
-        };
+        let report = PingReport::from_rtts(
+            2,
+            vec![Duration::from_micros(39), Duration::from_micros(42)],
+        );
 
         assert_eq!(
             packet_loss_line(&report, Duration::from_millis(1041)),
@@ -523,11 +532,7 @@ mod tests {
 
     #[test]
     fn rtt_line_is_omitted_without_replies() {
-        let report = PingReport {
-            rtts: vec![],
-            sent: 1,
-            received: 0,
-        };
+        let report = PingReport::from_rtts(1, vec![]);
 
         assert!(rtt_line(&report).is_none());
     }

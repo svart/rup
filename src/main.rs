@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::runtime;
@@ -23,23 +24,6 @@ struct OutputContext {
     target: ResolvedTarget,
     protocol: Protocol,
     request_size: Option<PacketSize>,
-}
-
-#[derive(Clone, Copy)]
-struct DisplayTiming {
-    interval: Duration,
-    adaptive: bool,
-    ping_number: Option<u64>,
-}
-
-impl From<&cli::PingerParams> for DisplayTiming {
-    fn from(params: &cli::PingerParams) -> Self {
-        Self {
-            interval: params.interval,
-            adaptive: params.adaptive,
-            ping_number: params.ping_number,
-        }
-    }
 }
 
 async fn resolve_remote_target(remote: String, protocol: Protocol) -> io::Result<ResolvedTarget> {
@@ -124,14 +108,6 @@ fn packet_loss_line(report: &PingReport, elapsed: Duration) -> String {
         report.loss_pct(),
         elapsed.as_millis()
     )
-}
-
-fn display_elapsed(elapsed: Duration, report: &PingReport, timing: DisplayTiming) -> Duration {
-    if !timing.adaptive && report.sent > 0 && timing.ping_number == Some(report.sent) {
-        elapsed.saturating_sub(timing.interval)
-    } else {
-        elapsed
-    }
 }
 
 fn rtt_line(report: &PingReport) -> Option<String> {
@@ -223,35 +199,39 @@ fn unix_timestamp_ms() -> u64 {
     u64::try_from(milliseconds).expect("system time does not fit into milliseconds")
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli_params = cli::get_cli_params();
 
-    let rt = runtime::Builder::new_current_thread()
+    let rt = match runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
-        .expect("failed to build runtime");
-
-    rt.block_on(async {
-        match cli_params {
-            PingerParams(params) => run_client(params).await,
-            ServerParams(params) => {
-                if let Err(e) = rup::run_server(params.protocol, params.local_address).await {
-                    eprintln!("{e}");
-                }
-            }
-        }
-    });
-}
-
-async fn run_client(params: cli::PingerParams) {
-    let target = match resolve_remote_target(params.remote_address.clone(), params.protocol).await {
-        Ok(target) => target,
-        Err(e) => {
-            eprintln!("{e}");
-            return;
+    {
+        Ok(rt) => rt,
+        Err(error) => {
+            eprintln!("failed to build runtime: {error}");
+            return ExitCode::FAILURE;
         }
     };
+
+    let result = rt.block_on(async {
+        match cli_params {
+            PingerParams(params) => run_client(params).await,
+            ServerParams(params) => rup::run_server(params.protocol, params.local_address).await,
+        }
+    });
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_client(params: cli::PingerParams) -> io::Result<()> {
+    let target = resolve_remote_target(params.remote_address.clone(), params.protocol).await?;
 
     let ctx = OutputContext {
         target: target.clone(),
@@ -259,19 +239,18 @@ async fn run_client(params: cli::PingerParams) {
         request_size: params.request_size,
     };
 
-    let config = PingConfig {
-        remote: target.address,
-        local: params.local_address,
-        protocol: params.protocol,
-        interval: params.interval,
-        adaptive: params.adaptive,
-        wait_time: params.wait_time,
-        request_size: params.request_size,
-        response_size: params.response_size,
-        tos: params.tos,
-        ping_number: params.ping_number,
-        run_time: params.run_time,
-    };
+    let mut config = PingConfig::new(target.address, params.protocol);
+    if let Some(local_address) = params.local_address {
+        config.local = local_address;
+    }
+    config.interval = params.interval;
+    config.adaptive = params.adaptive;
+    config.wait_time = params.wait_time;
+    config.request_size = params.request_size;
+    config.response_size = params.response_size;
+    config.tos = params.tos;
+    config.ping_number = params.ping_number;
+    config.run_time = params.run_time;
 
     let started_at_ms = unix_timestamp_ms();
     let started = Instant::now();
@@ -284,63 +263,54 @@ async fn run_client(params: cli::PingerParams) {
             )
         }
     }
-    match rup::start_ping_session(config).await {
-        Ok(mut session) => {
-            let mut interrupted = false;
-            loop {
-                let event = if interrupted {
-                    session.next().await
-                } else {
-                    tokio::select! {
-                        event = session.next() => event,
-                        signal = tokio::signal::ctrl_c() => {
-                            if let Err(e) = signal {
-                                eprintln!("failed to listen for Ctrl+C: {e}");
-                            }
-                            session.stop();
-                            interrupted = true;
-                            continue;
-                        }
+    let mut session = rup::start_ping_session(config).await?;
+    let mut interrupted = false;
+    loop {
+        let event = if interrupted {
+            session.next().await
+        } else {
+            tokio::select! {
+                event = session.next() => event,
+                signal = tokio::signal::ctrl_c() => {
+                    if let Err(e) = signal {
+                        eprintln!("failed to listen for Ctrl+C: {e}");
                     }
-                };
-                let Some(event) = event else {
-                    break;
-                };
-
-                match params.output {
-                    OutputFormat::Human => {
-                        if let PingEvent::Reply(result) = event {
-                            println!("{}", reply_line(&ctx, &result, params.format.as_ref()));
-                        }
-                    }
-                    OutputFormat::Jsonl => {
-                        println!("{}", jsonl_event(&event, started.elapsed(), started_at_ms));
-                    }
+                    session.stop();
+                    interrupted = true;
+                    continue;
                 }
             }
+        };
+        let Some(event) = event else {
+            break;
+        };
 
-            match session.report().await {
-                Ok(report) => {
-                    let elapsed =
-                        display_elapsed(started.elapsed(), &report, DisplayTiming::from(&params));
-                    match params.output {
-                        OutputFormat::Human => {
-                            println!("\n--- {} ping statistics ---", ctx.target.input);
-                            println!("{}", packet_loss_line(&report, elapsed));
-                            if let Some(line) = rtt_line(&report) {
-                                println!("{line}");
-                            }
-                        }
-                        OutputFormat::Jsonl => {
-                            println!("{}", jsonl_summary(&report, elapsed, started_at_ms))
-                        }
-                    }
+        match params.output {
+            OutputFormat::Human => {
+                if let PingEvent::Reply(result) = event {
+                    println!("{}", reply_line(&ctx, &result, params.format.as_ref()));
                 }
-                Err(e) => eprintln!("{e}"),
+            }
+            OutputFormat::Jsonl => {
+                println!("{}", jsonl_event(&event, started.elapsed(), started_at_ms));
             }
         }
-        Err(e) => eprintln!("{e}"),
     }
+
+    let report = session.report().await?;
+    let elapsed = started.elapsed();
+    match params.output {
+        OutputFormat::Human => {
+            println!("\n--- {} ping statistics ---", ctx.target.input);
+            println!("{}", packet_loss_line(&report, elapsed));
+            if let Some(line) = rtt_line(&report) {
+                println!("{line}");
+            }
+        }
+        OutputFormat::Jsonl => println!("{}", jsonl_summary(&report, elapsed, started_at_ms)),
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -533,40 +503,6 @@ mod tests {
         assert_eq!(
             rtt_line(&report).unwrap(),
             "rtt min/avg/max/mdev = 0.039/0.041/0.042/0.002 ms"
-        );
-    }
-
-    #[test]
-    fn display_elapsed_removes_final_interval_for_completed_fixed_count() {
-        let report = PingReport {
-            rtts: vec![Duration::from_millis(1), Duration::from_millis(1)],
-            sent: 2,
-            received: 2,
-        };
-
-        assert_eq!(
-            display_elapsed(
-                Duration::from_millis(2004),
-                &report,
-                DisplayTiming {
-                    interval: Duration::from_millis(1000),
-                    adaptive: false,
-                    ping_number: Some(2),
-                }
-            ),
-            Duration::from_millis(1004)
-        );
-        assert_eq!(
-            display_elapsed(
-                Duration::from_millis(2004),
-                &report,
-                DisplayTiming {
-                    interval: Duration::from_millis(1000),
-                    adaptive: true,
-                    ping_number: Some(2),
-                }
-            ),
-            Duration::from_millis(2004)
         );
     }
 

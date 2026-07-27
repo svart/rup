@@ -132,10 +132,14 @@ pub async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: Gener
             break;
         }
 
+        id += 1;
+        if config.ping_number.is_some_and(|n| id >= n) {
+            break;
+        }
+
         if !wait_for_next_request(&mut config.send_mode, stop_at).await {
             return;
         }
-        id += 1;
     }
 }
 
@@ -326,6 +330,28 @@ mod tests {
         }
         assert_eq!(count, 5);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generator_does_not_wait_after_last_request() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let handle = tokio::spawn(generator(
+            tx,
+            GeneratorConfig {
+                send_mode: SendMode::Interval(Duration::from_secs(60)),
+                ping_number: Some(1),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
+        ));
+
+        assert_eq!(rx.recv().await.unwrap().id, 0);
+        tokio::time::timeout(Duration::from_millis(50), handle)
+            .await
+            .expect("generator should finish immediately after its final request")
+            .unwrap();
     }
 
     #[tokio::test]

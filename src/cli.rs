@@ -60,8 +60,7 @@ fn cli() -> Command {
                 .long("local-address")
                 .help("Set local address to bind to")
                 .action(ArgAction::Set)
-                .value_parser(clap::value_parser!(SocketAddr))
-                .default_value("0.0.0.0:0"),
+                .value_parser(clap::value_parser!(SocketAddr)),
         )
         .arg(
             Arg::new(ARG_INTERVAL)
@@ -177,7 +176,7 @@ pub(crate) struct ServerParams {
 
 pub(crate) struct PingerParams {
     pub remote_address: String,
-    pub local_address: SocketAddr,
+    pub local_address: Option<SocketAddr>,
     pub interval: Duration,
     pub adaptive: bool,
     pub wait_time: Duration,
@@ -234,7 +233,7 @@ where
                 .get_one::<String>(ARG_REMOTE_ADDRESS)
                 .unwrap()
                 .clone(),
-            local_address: *matches.get_one::<SocketAddr>(ARG_LOCAL_ADDRESS).unwrap(),
+            local_address: matches.get_one::<SocketAddr>(ARG_LOCAL_ADDRESS).copied(),
             interval: Duration::from_millis(*matches.get_one::<u64>(ARG_INTERVAL).unwrap()),
             adaptive: *matches.get_one::<bool>(ARG_ADAPTIVE_INTERVAL).unwrap(),
             wait_time: Duration::from_millis(*matches.get_one::<u64>(ARG_WAIT_TIME).unwrap()),
@@ -306,10 +305,7 @@ mod tests {
             matches.get_one::<String>("remote-address").unwrap(),
             "127.0.0.1:5000"
         );
-        assert_eq!(
-            *matches.get_one::<SocketAddr>("local-address").unwrap(),
-            SocketAddr::from(([0, 0, 0, 0], 0))
-        );
+        assert!(matches.get_one::<SocketAddr>("local-address").is_none());
         assert_eq!(*matches.get_one::<u64>("interval").unwrap(), 1000);
         assert!(!*matches.get_one::<bool>("adaptive-interval").unwrap());
         assert_eq!(*matches.get_one::<u64>("wait-time").unwrap(), 1000);

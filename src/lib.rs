@@ -17,7 +17,7 @@ pub use transport::async_udp::UdpClientTransport;
 pub use transport::{Transport, receiver, transmitter};
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -284,7 +284,7 @@ impl PingConfig {
     pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
         Self {
             remote,
-            local: "0.0.0.0:0".parse().unwrap(),
+            local: unspecified_address(remote),
             protocol,
             interval: Duration::from_millis(1000),
             adaptive: false,
@@ -345,6 +345,14 @@ async fn spawn_ping_session(
             Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
     }
+}
+
+fn unspecified_address(remote: SocketAddr) -> SocketAddr {
+    let ip = match remote {
+        SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    SocketAddr::new(ip, 0)
 }
 
 fn spawn_ping_with_transport<T>(
@@ -768,6 +776,15 @@ mod tests {
 
         assert_eq!(config.remote, remote);
         assert_eq!(config.protocol, Protocol::Udp);
+    }
+
+    #[test]
+    fn ping_config_default_local_address_matches_remote_family() {
+        let ipv4 = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp);
+        let ipv6 = PingConfig::new("[::1]:5000".parse().unwrap(), Protocol::Udp);
+
+        assert_eq!(ipv4.local, "0.0.0.0:0".parse().unwrap());
+        assert_eq!(ipv6.local, "[::]:0".parse().unwrap());
     }
 
     #[tokio::test]

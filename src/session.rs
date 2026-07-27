@@ -615,7 +615,8 @@ pub async fn run_server_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PING_HDR_LEN, Request, Response, echo_codec};
+    use crate::pinger::PING_HDR_LEN;
+    use crate::{Request, Response, echo_codec};
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Instant;

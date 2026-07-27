@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -90,26 +89,13 @@ pub struct GeneratorConfig {
     pub response_size: Option<PacketSize>,
 }
 
-impl GeneratorConfig {
-    pub fn new(send_mode: SendMode) -> Self {
-        Self {
-            send_mode,
-            ping_number: None,
-            run_time: None,
-            request_size: None,
-            response_size: None,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct Echo {
     pub id: u64,
     pub len: u16,
     pub resp_size: u16,
 }
 
-pub async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: GeneratorConfig) {
+pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: GeneratorConfig) {
     let mut id: u64 = 0;
     let stop_at = config
         .run_time

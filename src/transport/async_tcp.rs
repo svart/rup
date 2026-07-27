@@ -90,13 +90,6 @@ async fn server_connection_handler(mut sock: TcpStream) {
     }
 }
 
-pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
-    server_transport_until(local_address, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
-}
-
 pub async fn server_transport_until(
     local_address: SocketAddr,
     shutdown: impl Future<Output = ()>,

@@ -7,7 +7,7 @@ use tokio::runtime;
 use crate::cli::CliParams::{PingerParams, ServerParams};
 use crate::cli::{self, OutputFormat};
 use crate::output_template::{ReplyFormat, fmt_duration_ms_value};
-use rup::{PING_HDR_LEN, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
+use rup::{PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
 use serde_json::json;
 
 #[derive(Clone, Debug)]
@@ -41,7 +41,7 @@ async fn resolve_remote_target(remote: String, protocol: Protocol) -> io::Result
 fn data_size(ctx: &OutputContext) -> usize {
     ctx.request_size
         .map(PacketSize::get)
-        .unwrap_or(PING_HDR_LEN as u16) as usize
+        .unwrap_or(PacketSize::MIN) as usize
 }
 
 fn total_packet_size(ctx: &OutputContext) -> usize {

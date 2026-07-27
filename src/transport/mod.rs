@@ -14,7 +14,7 @@ pub trait Transport: Send + Sync {
     fn recv(&self) -> impl std::future::Future<Output = io::Result<Response>> + Send;
 }
 
-pub async fn transmitter(
+pub(crate) async fn transmitter(
     transport: impl Transport,
     mut from_generator: Receiver<Request>,
     to_statista: Sender<StatEntry>,
@@ -35,7 +35,10 @@ pub async fn transmitter(
     Ok(())
 }
 
-pub async fn receiver(transport: impl Transport, to_statista: Sender<StatEntry>) -> io::Result<()> {
+pub(crate) async fn receiver(
+    transport: impl Transport,
+    to_statista: Sender<StatEntry>,
+) -> io::Result<()> {
     loop {
         let response = transport
             .recv()

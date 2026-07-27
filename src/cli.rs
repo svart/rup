@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::output_template::ReplyFormat;
-use rup::pinger::PING_HDR_LEN;
 use rup::{PacketSize, Protocol, TrafficClass};
 
 const ARG_REMOTE_ADDRESS: &str = "remote-address";
@@ -94,14 +93,14 @@ fn cli() -> Command {
                 .long("request-size")
                 .help("Size of echo request")
                 .action(ArgAction::Set)
-                .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
+                .value_parser(clap::value_parser!(u16).range(PacketSize::MIN as i64..)),
         )
         .arg(
             Arg::new(ARG_RESPONSE_SIZE)
                 .long("response-size")
                 .help("Size of echo response")
                 .action(ArgAction::Set)
-                .value_parser(clap::value_parser!(u16).range(PING_HDR_LEN as i64..)),
+                .value_parser(clap::value_parser!(u16).range(PacketSize::MIN as i64..)),
         )
         .arg(
             Arg::new(ARG_TOS)

@@ -118,13 +118,6 @@ unsafe fn extended_error_origin(msg: &libc::msghdr) -> Option<u8> {
     None
 }
 
-pub async fn server_transport(local_address: SocketAddr) -> io::Result<()> {
-    server_transport_until(local_address, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
-}
-
 pub async fn server_transport_until(
     local_address: SocketAddr,
     shutdown: impl Future<Output = ()>,

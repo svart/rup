@@ -50,6 +50,7 @@ pub(crate) fn std_deviation(rtts: &[Duration]) -> Option<Duration> {
 enum StatSink {
     None,
     Events(Sender<PingEvent>),
+    #[cfg(test)]
     Collector(Sender<PingResult>),
 }
 
@@ -66,6 +67,7 @@ impl StatSink {
             StatSink::Events(sender) => {
                 let _ = sender.send(PingEvent::Reply(result)).await;
             }
+            #[cfg(test)]
             StatSink::Collector(sender) => {
                 let _ = sender.send(result).await;
             }
@@ -172,21 +174,6 @@ async fn run_statista_core(
     tracker.into_report()
 }
 
-pub async fn statista(
-    from_transport: Receiver<StatEntry>,
-    to_generator: Option<Sender<()>>,
-    wait_time: Duration,
-) {
-    let _ = run_statista_core(
-        from_transport,
-        None,
-        to_generator,
-        wait_time,
-        StatSink::None,
-    )
-    .await;
-}
-
 pub(crate) async fn statista_report_with_send_done(
     from_transport: Receiver<StatEntry>,
     sends_done: Receiver<()>,
@@ -237,7 +224,8 @@ pub(crate) async fn statista_with_events_and_send_done(
     .await
 }
 
-pub async fn statista_with_collector(
+#[cfg(test)]
+async fn statista_with_collector(
     from_transport: Receiver<StatEntry>,
     to_generator: Option<Sender<()>>,
     wait_time: Duration,
@@ -253,18 +241,21 @@ pub async fn statista_with_collector(
     .await
 }
 
-pub struct RttSequence {
+#[cfg(test)]
+struct RttSequence {
     rtts: Vec<Duration>,
     sent: u64,
     received: u64,
 }
 
+#[cfg(test)]
 impl Default for RttSequence {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl RttSequence {
     pub fn new() -> Self {
         RttSequence {

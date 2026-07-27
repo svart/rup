@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -103,6 +104,24 @@ pub struct PingReport {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PingReportError {
+    sent: u64,
+    received: u64,
+}
+
+impl fmt::Display for PingReportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "received count {} exceeds sent count {}",
+            self.received, self.sent
+        )
+    }
+}
+
+impl std::error::Error for PingReportError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TrafficClass(u8);
 
 impl TrafficClass {
@@ -116,12 +135,16 @@ impl TrafficClass {
 }
 
 impl PingReport {
-    pub fn from_rtts(sent: u64, rtts: Vec<Duration>) -> Self {
-        Self {
-            received: rtts.len() as u64,
+    pub fn from_rtts(sent: u64, rtts: Vec<Duration>) -> Result<Self, PingReportError> {
+        let received = rtts.len() as u64;
+        if received > sent {
+            return Err(PingReportError { sent, received });
+        }
+        Ok(Self {
+            received,
             sent,
             rtts,
-        }
+        })
     }
 
     pub fn sent(&self) -> u64 {

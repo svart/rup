@@ -343,7 +343,8 @@ mod tests {
         let report = PingReport::from_rtts(
             3,
             vec![Duration::from_micros(39), Duration::from_micros(42)],
-        );
+        )
+        .unwrap();
 
         let records = [
             jsonl_metadata(&ctx, Duration::from_millis(100), false, 1_700_000_000_000),
@@ -499,7 +500,8 @@ mod tests {
         let report = PingReport::from_rtts(
             2,
             vec![Duration::from_micros(39), Duration::from_micros(42)],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             packet_loss_line(&report, Duration::from_millis(1041)),
@@ -532,7 +534,7 @@ mod tests {
 
     #[test]
     fn rtt_line_is_omitted_without_replies() {
-        let report = PingReport::from_rtts(1, vec![]);
+        let report = PingReport::from_rtts(1, vec![]).unwrap();
 
         assert!(rtt_line(&report).is_none());
     }

@@ -82,6 +82,7 @@ impl MeasurementTracker {
 
     pub(super) fn into_report(self) -> PingReport {
         PingReport::from_rtts(self.sent, self.rtts)
+            .expect("the tracker records at most one RTT per sent request")
     }
 
     fn match_response(&mut self, response: Response) -> Vec<PingEvent> {

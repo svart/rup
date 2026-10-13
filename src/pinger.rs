@@ -1,7 +1,9 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::time::{Instant as TokioInstant, sleep, sleep_until};
+use tokio::time::{
+    Instant as TokioInstant, Interval, MissedTickBehavior, interval_at, sleep_until,
+};
 
 pub const PING_HDR_LEN: usize =
     std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
@@ -95,11 +97,32 @@ pub struct Echo {
     pub resp_size: u16,
 }
 
-pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config: GeneratorConfig) {
+enum Pacer {
+    Adaptive(mpsc::Receiver<()>),
+    Interval(Interval),
+}
+
+impl Pacer {
+    fn new(send_mode: SendMode) -> Self {
+        match send_mode {
+            SendMode::Adaptive(channel) => Self::Adaptive(channel),
+            SendMode::Interval(period) => {
+                // Fixed deadlines keep send overhead and timer rounding from
+                // adding up; Delay avoids a catch-up burst after a long stall.
+                let mut ticker = interval_at(TokioInstant::now() + period, period);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                Self::Interval(ticker)
+            }
+        }
+    }
+}
+
+pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, config: GeneratorConfig) {
     let mut id: u64 = 0;
     let stop_at = config
         .run_time
         .map(|run_time| TokioInstant::now() + run_time);
+    let mut pacer = Pacer::new(config.send_mode);
 
     loop {
         if let Some(n) = config.ping_number
@@ -123,15 +146,15 @@ pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, mut config
             break;
         }
 
-        if !wait_for_next_request(&mut config.send_mode, stop_at).await {
+        if !wait_for_next_request(&mut pacer, stop_at).await {
             return;
         }
     }
 }
 
-async fn wait_for_next_request(send_mode: &mut SendMode, stop_at: Option<TokioInstant>) -> bool {
-    match send_mode {
-        SendMode::Adaptive(channel) => {
+async fn wait_for_next_request(pacer: &mut Pacer, stop_at: Option<TokioInstant>) -> bool {
+    match pacer {
+        Pacer::Adaptive(channel) => {
             if let Some(stop_at) = stop_at {
                 tokio::select! {
                     signal = channel.recv() => signal.is_some(),
@@ -141,14 +164,16 @@ async fn wait_for_next_request(send_mode: &mut SendMode, stop_at: Option<TokioIn
                 channel.recv().await.is_some()
             }
         }
-        SendMode::Interval(interval) => {
+        Pacer::Interval(ticker) => {
             if let Some(stop_at) = stop_at {
+                // A tick due exactly at the run-time end must not send.
                 tokio::select! {
-                    _ = sleep(*interval) => true,
+                    biased;
                     _ = sleep_until(stop_at) => false,
+                    _ = ticker.tick() => true,
                 }
             } else {
-                sleep(*interval).await;
+                ticker.tick().await;
                 true
             }
         }
@@ -338,6 +363,62 @@ mod tests {
             .await
             .expect("generator should finish immediately after its final request")
             .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generator_interval_does_not_accumulate_timer_overhead() {
+        // Tokio rounds timer deadlines up to whole milliseconds, so a 1.5 ms
+        // interval exposes a schedule that restarts from each late wakeup.
+        let interval = Duration::from_micros(1500);
+        let (tx, mut rx) = mpsc::channel(16);
+        let started = TokioInstant::now();
+
+        tokio::spawn(generator(
+            tx,
+            GeneratorConfig {
+                send_mode: SendMode::Interval(interval),
+                ping_number: Some(11),
+                run_time: None,
+                request_size: None,
+                response_size: None,
+            },
+        ));
+
+        let mut last_sent = started;
+        while rx.recv().await.is_some() {
+            last_sent = TokioInstant::now();
+        }
+
+        let elapsed = last_sent - started;
+        assert!(
+            elapsed <= interval * 10 + Duration::from_millis(1),
+            "10 intervals took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generator_does_not_send_a_request_due_at_run_time_end() {
+        // select! polls ready branches in random order, so repeat the race.
+        for _ in 0..32 {
+            let (tx, mut rx) = mpsc::channel(16);
+
+            tokio::spawn(generator(
+                tx,
+                GeneratorConfig {
+                    send_mode: SendMode::Interval(Duration::from_millis(100)),
+                    ping_number: None,
+                    run_time: Some(Duration::from_secs(1)),
+                    request_size: None,
+                    response_size: None,
+                },
+            ));
+
+            let mut count = 0;
+            while rx.recv().await.is_some() {
+                count += 1;
+            }
+            assert_eq!(count, 10);
+        }
     }
 
     #[tokio::test]

@@ -24,8 +24,10 @@ generator --Request--> transmitter --sent--> tracker --PingEvent--> caller
    events. The CLI can render the same event stream as human-readable text or
    versioned JSON Lines. Completed sessions return a `PingReport`.
 
-Fixed interval mode sleeps between generated requests. Adaptive mode waits for
-`statista` to signal after either a response or timeout.
+Fixed interval mode generates requests on a fixed schedule, so send overhead and
+timer rounding do not accumulate; after a stall it resumes one interval later
+instead of bursting. A request due exactly at the run-time limit is not sent.
+Adaptive mode waits for `statista` to signal after either a response or timeout.
 
 Live sessions own an explicit stop channel. The CLI translates Ctrl+C into a
 session stop; the generator closes, the transmitter drains requests already

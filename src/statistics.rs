@@ -626,6 +626,7 @@ mod tests {
             PingEvent::Reply(PingResult {
                 seq: 1,
                 rtt: Duration::from_millis(3),
+                received_at: sent + Duration::from_millis(3),
                 size: 64,
                 ttl: Some(63),
             })

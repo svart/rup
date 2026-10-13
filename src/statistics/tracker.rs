@@ -98,6 +98,7 @@ impl MeasurementTracker {
                     let result = PingResult {
                         seq: response.id,
                         rtt: response.timestamp.saturating_duration_since(request.ts),
+                        received_at: response.timestamp,
                         size: response.size,
                         ttl: response.ttl,
                     };
@@ -141,6 +142,7 @@ mod tests {
             vec![PingEvent::Reply(PingResult {
                 seq: 7,
                 rtt: Duration::from_millis(3),
+                received_at: started + Duration::from_millis(3),
                 size: 12,
                 ttl: Some(64),
             })]
@@ -163,7 +165,8 @@ mod tests {
         );
         assert!(matches!(
             tracker.ingest(sent(0, started)).as_slice(),
-            [PingEvent::Reply(PingResult { seq: 0, .. })]
+            [PingEvent::Reply(PingResult { seq: 0, received_at, .. })]
+                if *received_at == started + Duration::from_millis(2)
         ));
     }
 
@@ -183,6 +186,7 @@ mod tests {
                 PingEvent::Reply(PingResult {
                     seq: 2,
                     rtt: Duration::from_millis(1),
+                    received_at: started + Duration::from_millis(1),
                     size: 12,
                     ttl: Some(64),
                 }),

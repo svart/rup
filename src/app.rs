@@ -63,13 +63,19 @@ fn header_line(ctx: &OutputContext) -> String {
     )
 }
 
-fn reply_line(ctx: &OutputContext, result: &PingResult, format: Option<&ReplyFormat>) -> String {
+fn reply_line(
+    ctx: &OutputContext,
+    result: &PingResult,
+    format: Option<&ReplyFormat>,
+    inter_packet: Option<Duration>,
+) -> String {
     if let Some(format) = format {
         return format.render(
             &ctx.target.input,
             ctx.target.address.ip(),
             ctx.protocol,
             result,
+            inter_packet,
         );
     }
 
@@ -94,6 +100,13 @@ fn reply_line(ctx: &OutputContext, result: &PingResult, format: Option<&ReplyFor
         ttl,
         fmt_duration_ms_value(result.rtt)
     )
+}
+
+/// Returns the time since the previous reply and records `received_at` as the new previous reply.
+fn inter_packet_interval(previous: &mut Option<Instant>, received_at: Instant) -> Option<Duration> {
+    previous
+        .replace(received_at)
+        .map(|previous| received_at.saturating_duration_since(previous))
 }
 
 fn packet_loss_line(report: &PingReport, elapsed: Duration) -> String {
@@ -275,6 +288,7 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
     }
     let mut session = rup::start_ping_session(config).await?;
     let mut interrupted = false;
+    let mut previous_reply_at = None;
     loop {
         let event = if interrupted {
             session.next().await
@@ -298,7 +312,12 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
         match params.output {
             OutputFormat::Human => {
                 if let PingEvent::Reply(result) = event {
-                    println!("{}", reply_line(&ctx, &result, params.format.as_ref()));
+                    let inter_packet =
+                        inter_packet_interval(&mut previous_reply_at, result.received_at);
+                    println!(
+                        "{}",
+                        reply_line(&ctx, &result, params.format.as_ref(), inter_packet)
+                    );
                 }
             }
             OutputFormat::Jsonl => {
@@ -340,6 +359,7 @@ mod tests {
         let reply = PingResult {
             seq: 7,
             rtt: Duration::from_micros(42),
+            received_at: Instant::now(),
             size: 56,
             ttl: Some(64),
         };
@@ -395,6 +415,7 @@ mod tests {
         let event = PingEvent::Reply(PingResult {
             seq: 3,
             rtt: Duration::from_micros(75),
+            received_at: Instant::now(),
             size: 0,
             ttl: None,
         });
@@ -441,12 +462,13 @@ mod tests {
         let result = PingResult {
             seq: 0,
             rtt: Duration::from_micros(42),
+            received_at: Instant::now(),
             size: 64,
             ttl: Some(64),
         };
 
         assert_eq!(
-            reply_line(&ctx, &result, None),
+            reply_line(&ctx, &result, None, None),
             "64 bytes from 127.0.0.1: seq=0 ttl=64 time=0.042 ms"
         );
     }
@@ -464,12 +486,13 @@ mod tests {
         let result = PingResult {
             seq: 4,
             rtt: Duration::from_micros(80),
+            received_at: Instant::now(),
             size: 0,
             ttl: None,
         };
 
         assert_eq!(
-            reply_line(&ctx, &result, None),
+            reply_line(&ctx, &result, None, None),
             "terminal response from 127.0.0.1: seq=4 time=0.080 ms"
         );
     }
@@ -487,15 +510,98 @@ mod tests {
         let result = PingResult {
             seq: 7,
             rtt: Duration::from_micros(42),
+            received_at: Instant::now(),
             size: 64,
             ttl: Some(64),
         };
         let format = "{ip}: {seq} => {rtt}".parse().unwrap();
 
         assert_eq!(
-            reply_line(&ctx, &result, Some(&format)),
+            reply_line(&ctx, &result, Some(&format), None),
             "192.0.2.1: 7 => 0.042 ms"
         );
+    }
+
+    #[test]
+    fn reply_line_renders_inter_packet_interval_from_custom_format() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "172.16.101.1".to_string(),
+                address: "172.16.101.1:0".parse().unwrap(),
+            },
+            protocol: Protocol::Icmp,
+            request_size: None,
+        };
+        let result = PingResult {
+            seq: 100,
+            rtt: Duration::from_millis(56),
+            received_at: Instant::now(),
+            size: 64,
+            ttl: Some(64),
+        };
+        let format = r"{inter_packet}\n{seq} => {rtt}".parse().unwrap();
+
+        assert_eq!(
+            reply_line(
+                &ctx,
+                &result,
+                Some(&format),
+                Some(Duration::from_millis(1200))
+            ),
+            "1200.000 ms\n100 => 56.000 ms"
+        );
+    }
+
+    #[test]
+    fn default_reply_line_omits_inter_packet_interval() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "127.0.0.1".to_string(),
+                address: "127.0.0.1:0".parse().unwrap(),
+            },
+            protocol: Protocol::Icmp,
+            request_size: None,
+        };
+        let result = PingResult {
+            seq: 1,
+            rtt: Duration::from_micros(42),
+            received_at: Instant::now(),
+            size: 64,
+            ttl: Some(64),
+        };
+
+        assert_eq!(
+            reply_line(&ctx, &result, None, Some(Duration::from_millis(1000))),
+            "64 bytes from 127.0.0.1: seq=1 ttl=64 time=0.042 ms"
+        );
+    }
+
+    #[test]
+    fn inter_packet_interval_measures_time_since_previous_reply() {
+        let started = Instant::now();
+        let mut previous = None;
+
+        assert_eq!(inter_packet_interval(&mut previous, started), None);
+        assert_eq!(
+            inter_packet_interval(&mut previous, started + Duration::from_millis(459)),
+            Some(Duration::from_millis(459))
+        );
+        assert_eq!(
+            inter_packet_interval(&mut previous, started + Duration::from_millis(1659)),
+            Some(Duration::from_millis(1200))
+        );
+    }
+
+    #[test]
+    fn inter_packet_interval_saturates_for_out_of_order_timestamps() {
+        let started = Instant::now();
+        let mut previous = Some(started + Duration::from_millis(5));
+
+        assert_eq!(
+            inter_packet_interval(&mut previous, started),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(previous, Some(started));
     }
 
     #[test]

@@ -35,7 +35,7 @@ rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 | `--tos <0-255>` | Outgoing IP TOS / IPv6 traffic class byte |
 | `--local-address <addr>` | Local bind address [default: unspecified address matching the remote IP family] |
 | `--output <human|jsonl>` | Output format [default: `human`] |
-| `--format <template>` | Customize each human-readable reply line |
+| `--format <template>` | Customize each human-readable reply record |
 
 Examples:
 
@@ -109,7 +109,7 @@ PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
 rtt min/avg/max/mdev = 0.052/0.052/0.053/0.001 ms
 ```
 
-Use `--format` to customize each reply line while retaining the normal header
+Use `--format` to customize each reply record while retaining the normal header
 and final statistics:
 
 ```sh
@@ -136,15 +136,38 @@ The supported fields are:
 | `{rtt}` | RTT in milliseconds with three decimal places and the `ms` unit |
 | `{rtt_ms}` | RTT in milliseconds with three decimal places and no unit |
 | `{rtt_ms:.N}` | Unitless RTT with `N` decimal places, where `N` is 0 through 6 |
+| `{inter_packet}` | Time since the previous reply was received, in milliseconds with three decimal places and the `ms` unit |
+| `{inter_packet_ms}` | Inter-packet interval in milliseconds with three decimal places and no unit |
+| `{inter_packet_ms:.N}` | Unitless inter-packet interval with `N` decimal places, where `N` is 0 through 6 |
 | `{size}` | Response size in bytes |
 | `{ttl}` | TTL, or `-` when unavailable |
 | `{status}` | `reply` or `terminal_reply` |
 | `{protocol}` | `icmp`, `udp`, or `tcp` |
 
-Use `{{` and `}}` for literal braces. Invalid fields, unmatched braces, and
-embedded newlines are rejected before the ping session starts. `--format`
-cannot be used with `--output jsonl`. Precision is supported only for
-`{rtt_ms}`; for example, `{rtt_ms:.2}` renders two decimal places.
+The inter-packet interval is measured between the receive timestamps of
+consecutive replies, so it includes gaps left by lost packets. The first reply
+has no previous reply and renders `-` for all `inter_packet` fields. The default
+reply line does not show it.
+
+Use `{{` and `}}` for literal braces. The escapes `\n` (newline), `\t` (tab),
+and `\\` (backslash) let one reply span several lines:
+
+```sh
+rup 127.0.0.1 -i 500 --format '{inter_packet}\n{seq} => {rtt}'
+```
+
+```text
+PING 127.0.0.1 (127.0.0.1) 12(40) bytes of data.
+-
+0 => 0.053 ms
+500.412 ms
+1 => 0.052 ms
+```
+
+Invalid fields, unmatched braces, and other backslash escapes are rejected
+before the ping session starts. `--format` cannot be used with
+`--output jsonl`. Precision is supported only for `{rtt_ms}` and
+`{inter_packet_ms}`; for example, `{rtt_ms:.2}` renders two decimal places.
 
 Use `--output jsonl` for machine-readable output. The first line is a
 `rup.ping` metadata record with schema version 3. It is followed by `reply`,

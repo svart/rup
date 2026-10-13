@@ -1,7 +1,7 @@
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -83,6 +83,8 @@ pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
 pub struct PingResult {
     pub seq: u64,
     pub rtt: Duration,
+    /// When the transport received the reply; the RTT ends at this instant.
+    pub received_at: Instant,
     pub size: usize,
     pub ttl: Option<u8>,
 }

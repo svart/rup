@@ -119,6 +119,10 @@ rup application echo when its first connection succeeds and otherwise switches
 to per-request connect probes. These outcomes arrive as ordinary
 `PingEvent::Reply` values with `size == 0` and `ttl == None`.
 
+`PingResult::received_at` is the monotonic `Instant` at which the transport
+received the reply; the RTT ends at that instant. Subtract the `received_at`
+of consecutive replies to get the inter-packet (inter-arrival) interval.
+
 ## Report Values
 
 `PingReport` keeps its representation private so `received` cannot disagree

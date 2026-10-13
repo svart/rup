@@ -60,7 +60,7 @@ The public low-level surface is intentionally small:
 - `rup::Request`, `rup::Response`, `rup::PacketSize`
 - `rup::PingSession`, `rup::PingEvent` — consume live ping results with `next().await`
 - `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
-- `rup::PingResult` — individual RTT measurement `{seq, rtt, size, ttl}`
+- `rup::PingResult` — individual RTT measurement `{seq, rtt, received_at, size, ttl}`
 - `rup::has_port()`, `rup::ensure_port()` — address helpers
 
 ## Architecture

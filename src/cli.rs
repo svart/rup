@@ -268,13 +268,8 @@ where
 }
 
 pub(crate) fn get_cli_params() -> CliParams {
-    match get_cli_params_from(std::env::args_os()) {
-        Ok(params) => params,
-        Err(e) => {
-            let _ = e.print();
-            std::process::exit(2);
-        }
-    }
+    // clap exits with 0 for --help/--version and 2 for usage errors.
+    get_cli_params_from(std::env::args_os()).unwrap_or_else(|e| e.exit())
 }
 
 #[cfg(test)]

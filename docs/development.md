@@ -10,6 +10,7 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 | `src/lib.rs` | Module declarations and intentional public re-exports |
 | `src/session.rs` | Public session/config/report API, task supervision, server dispatch |
 | `src/protocol.rs` | `Protocol` enum, parsing, display names, CLI value list |
+| `src/http_target.rs` | Dependency-free HTTP URL parsing (`HttpTarget`, `HttpScheme`, `HttpVersion`) |
 | `src/echo_codec.rs` | Shared UDP/TCP echo payload encoding and decoding |
 | `src/pinger.rs` | Request/response domain types, `Echo`, `SendMode`, request generator |
 | `src/statistics.rs` | RTT matching, timeout handling, live event emission, shared statistics helpers |
@@ -19,6 +20,8 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 | `src/transport/async_udp.rs` | UDP client transport and UDP echo server |
 | `src/transport/async_tcp.rs` | TCP client transport and TCP echo server |
 | `src/transport/async_icmp.rs` | ICMP client transport using Linux ping sockets |
+| `src/transport/async_http.rs` | HTTP/1.1 and HTTP/2 client transport over TCP or rustls (`http` feature) |
+| `src/transport/disabled/async_http.rs` | Stub with the same signatures, used when `http` is disabled |
 | `src/cli.rs` | Clap command definition and CLI parameter extraction |
 | `src/app.rs` | Runtime setup, DNS resolution, session orchestration, and output |
 | `src/main.rs` | Binary module wiring and process entry point |
@@ -33,6 +36,8 @@ Run the normal validation set before committing:
 cargo test
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo test --no-default-features
 cargo doc --no-deps
 ```
 
@@ -44,6 +49,8 @@ cargo doc --no-deps
 | `src/transport/async_udp.rs` | Echo encoding/parsing and loopback UDP send/receive |
 | `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
 | `src/transport/async_icmp.rs` | ICMP packet assembly, checksums, response parsing, loopback ping when available |
+| `src/transport/async_http.rs` | Loopback hyper servers: connection reuse, reconnect after GOAWAY, h2c rejection, sessions |
+| `src/http_target.rs` | URL parsing, default ports, IPv6 brackets, invalid URLs |
 | `src/cli.rs` | CLI defaults, validation, protocol parsing, server subcommand arguments |
 | `src/session.rs` | Address helpers, report statistics, task failures, and session orchestration |
 | `tests/` | Public API compilation and CLI process behavior |
@@ -71,6 +78,10 @@ cargo run --release -- -p tcp -n 3 127.0.0.1:59999
 
 # ICMP
 cargo run --release -- 8.8.8.8
+
+# HTTP(S), no rup server needed
+cargo run --release -- --protocol=http https://example.com
+cargo run --release -- -p http2 https://example.com
 ```
 
 Remember that `-p` is a root CLI option. For server mode, it must appear before
@@ -97,7 +108,8 @@ coverage percentages unless they were just regenerated.
 
 ## Notes
 
-- TCP/UDP require `host:port`; ICMP accepts hosts without a port.
+- TCP/UDP require `host:port`; ICMP accepts hosts without a port; HTTP takes a
+  URL.
 - Server transports return `io::Result<()>` for setup failures such as bind
   errors, but continue past per-client/per-packet errors where possible.
 - TCP and UDP use the shared echo payload format. ICMP wraps that payload in an

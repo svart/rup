@@ -75,6 +75,16 @@ receive packet TOS/TCLASS metadata with `recvmsg` where the platform supports
 it, then apply that byte to the echo response. TCP and ICMP support client-side
 outgoing TOS; there is no TCP or ICMP server-side reflection path.
 
+HTTP transports (`src/transport/async_http.rs`) run every request in its own
+task: `send()` records the start time and spawns the exchange, and the task
+queues a `Response` once the full body is read. HTTP/1.1 opens a new connection
+per exchange; HTTP/2 shares one `SendRequest` handle and replaces it after
+GOAWAY or a closed connection. A failed or timed-out exchange produces no
+response, so statista reports it as lost. Sockets set `TCP_NODELAY`, so that
+small HTTP/2 control frames do not delay requests through Nagle's algorithm.
+The URL type (`src/http_target.rs`) has no dependencies and stays available
+without the `http` feature.
+
 ICMP uses Linux ping sockets (`SOCK_DGRAM | IPPROTO_ICMP`) rather than raw
 sockets. The kernel handles identifier assignment; `rup` builds the ICMP header
 and embeds the same echo payload after it.
@@ -98,6 +108,23 @@ The header is 12 bytes: eight bytes for the sequence ID and two bytes each for
 request and response lengths. Encoding is manual and does not depend on Rust
 struct layout.
 
+## Optional Transports
+
+A transport with heavy dependencies sits behind a cargo feature. The only `cfg`
+attributes are the module selection in `src/transport/mod.rs` and the public
+re-export in `src/lib.rs`:
+
+```rust
+#[cfg_attr(not(feature = "http"), path = "disabled/async_http.rs")]
+pub mod async_http;
+```
+
+The stub in `src/transport/disabled/` declares the same signatures, with an
+uninhabited transport type whose constructor returns `ErrorKind::Unsupported`.
+`Protocol`, session dispatch, the CLI, and the output code therefore compile
+unchanged. CI builds and tests both feature sets, which catches signature drift
+between the real module and its stub.
+
 ## Adding A Protocol
 
 1. Add `src/transport/async_<proto>.rs`.
@@ -106,4 +133,7 @@ struct layout.
 4. Add a `Protocol` variant and parser/display support in `src/protocol.rs`.
 5. Register client construction in `src/session.rs`.
 6. Register server support if the protocol needs a `rup` echo server.
-7. Add parser, packet, transport, and high-level session tests.
+   Otherwise, add it to the "no server" arm of `run_server_until`.
+7. If the protocol adds dependencies, put it behind a feature with a stub, as
+   described in "Optional Transports".
+8. Add parser, packet, transport, and high-level session tests.

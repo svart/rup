@@ -164,7 +164,7 @@ pub struct TcpClientTransport {
     kind: Arc<TcpClientKind>,
 }
 
-fn configured_tcp_socket(
+pub(crate) fn configured_tcp_socket(
     local: SocketAddr,
     remote: SocketAddr,
     tos: Option<TrafficClass>,

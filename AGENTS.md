@@ -3,7 +3,7 @@
 ## Project overview
 
 `rup` is a universal pinger library and CLI tool — measures RTT over UDP, TCP,
-and ICMP. Written in Rust (edition 2024) with tokio async runtime.
+ICMP, and HTTP(S). Written in Rust (edition 2024) with tokio async runtime.
 
 The project is a single crate with two targets:
 - **Library** (`src/lib.rs`) — re-exports all public API: `Transport` trait,
@@ -27,6 +27,9 @@ The project is a single crate with two targets:
 | `src/transport/async_udp.rs` | lib | `UdpTransport` implementation + UDP echo server |
 | `src/transport/async_tcp.rs` | lib | `TcpTransport` implementation + TCP echo server |
 | `src/transport/async_icmp.rs` | lib | `IcmpTransport` implementation (Linux ping socket, no root needed) |
+| `src/transport/async_http.rs` | lib | `HttpTransport`: HTTP/1.1 (new connection per request) and HTTP/2 (persistent), `http` feature |
+| `src/transport/disabled/async_http.rs` | lib | Stub with the same signatures, used without the `http` feature |
+| `src/http_target.rs` | lib | Dependency-free URL parsing: `HttpTarget`, `HttpScheme`, `HttpVersion` |
 
 ## Library public API
 
@@ -56,7 +59,9 @@ println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max
 The public low-level surface is intentionally small:
 
 - `rup::Transport` trait — implement for custom protocols
-- `rup::UdpTransport`, `rup::TcpTransport`, `rup::IcmpTransport`
+- `rup::UdpTransport`, `rup::TcpTransport`, `rup::IcmpTransport`,
+  `rup::HttpTransport` (`http` feature)
+- `rup::HttpTarget`, `rup::HttpScheme`, `rup::HttpVersion`
 - `rup::Request`, `rup::Response`, `rup::PacketSize`
 - `rup::PingSession`, `rup::PingEvent` — consume live ping results with `next().await`
 - `rup::PingReport` — summary report with min/med/mean/max/std_dev/loss_pct
@@ -164,9 +169,25 @@ Client mode is the default: `rup 8.8.8.8`. When `-p`/`--protocol` is omitted,
 client mode defaults to ICMP and server mode defaults to UDP. Parsed protocol is
 stored as `PingerParams.protocol`.
 
+### Optional features
+`http` (default) gates the hyper/rustls dependencies. The only `cfg` attributes
+are the `#[cfg_attr(not(feature = "http"), path = "disabled/async_http.rs")]`
+module selection in `transport/mod.rs` and the `HttpTransport` re-export in
+`lib.rs`. Keep the stub's signatures in sync, and check both
+`cargo clippy --all-targets` and `cargo clippy --all-targets --no-default-features`.
+
+### HTTP
+`-p http1` (alias `http`) / `-p http2` take a URL (`https://host/path`). A
+request is a `GET`, and RTT ends when the full body is read. HTTP/1.1 opens a
+new connection per request, so RTT includes connect and TLS. HTTP/2 keeps one
+connection and reconnects after GOAWAY. `connect()` sends one unmeasured
+warm-up `GET` so that configuration errors fail fast. Later failures count as
+loss. Sockets set `TCP_NODELAY`.
+
 ### Port handling
 - TCP/UDP require port in address (`host:port`)
 - ICMP ignores port; `ensure_port()` appends `:0` if missing before DNS resolution
+- HTTP takes a URL; `ensure_port()` returns its `host:port` with the scheme's default port
 - DNS resolution via `tokio::net::lookup_host()`
 
 UDP/TCP do not always require a running rup server for an RTT sample: Linux UDP
@@ -183,7 +204,7 @@ variable-length responses.
 ```sh
 cargo build                # debug build
 cargo build --release      # release build
-cargo test                 # 137+ unit tests (lib + bin)
+cargo test                 # 230+ tests (lib + bin + integration)
 cargo clippy               # must pass before committing (zero warnings)
 ```
 

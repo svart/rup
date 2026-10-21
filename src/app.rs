@@ -7,7 +7,7 @@ use tokio::runtime;
 use crate::cli::CliParams::{PingerParams, ServerParams};
 use crate::cli::{self, OutputFormat};
 use crate::output_template::{ReplyFormat, fmt_duration_ms_value};
-use rup::{PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
+use rup::{HttpTarget, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
 use serde_json::json;
 
 #[derive(Clone, Debug)]
@@ -48,12 +48,18 @@ fn total_packet_size(ctx: &OutputContext) -> usize {
     let ip_header = if ctx.target.address.is_ipv4() { 20 } else { 40 };
     let protocol_header = match ctx.protocol {
         Protocol::Icmp | Protocol::Udp => 8,
-        Protocol::Tcp => 20,
+        Protocol::Tcp | Protocol::Http1 | Protocol::Http2 => 20,
     };
     data_size(ctx) + ip_header + protocol_header
 }
 
 fn header_line(ctx: &OutputContext) -> String {
+    if ctx.protocol.http_version().is_some() {
+        return format!(
+            "PING {} ({}) via {}.",
+            ctx.target.input, ctx.target.address, ctx.protocol
+        );
+    }
     format!(
         "PING {} ({}) {}({}) bytes of data.",
         ctx.target.input,
@@ -252,6 +258,13 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
     };
 
     let mut config = PingConfig::new(target.address, params.protocol);
+    if params.protocol.http_version().is_some() {
+        let http_target = params
+            .remote_address
+            .parse::<HttpTarget>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        config = config.http_target(http_target);
+    }
     config = config.interval(params.interval).timeout(params.wait_time);
     if let Some(local_address) = params.local_address {
         config = config.local_address(local_address);
@@ -450,6 +463,23 @@ mod tests {
     }
 
     #[test]
+    fn header_line_names_http_target_and_version() {
+        let ctx = OutputContext {
+            target: ResolvedTarget {
+                input: "https://example.test".to_string(),
+                address: "192.0.2.1:443".parse().unwrap(),
+            },
+            protocol: Protocol::Http2,
+            request_size: None,
+        };
+
+        assert_eq!(
+            header_line(&ctx),
+            "PING https://example.test (192.0.2.1:443) via http2."
+        );
+    }
+
+    #[test]
     fn reply_line_uses_seq_and_optional_ttl() {
         let ctx = OutputContext {
             target: ResolvedTarget {
@@ -639,6 +669,16 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn resolve_remote_address_uses_http_url_default_port() {
+        let target = resolve_remote_target("https://127.0.0.1/path".to_string(), Protocol::Http1)
+            .await
+            .unwrap();
+
+        assert_eq!(target.address, "127.0.0.1:443".parse().unwrap());
+        assert_eq!(target.input, "https://127.0.0.1/path");
     }
 
     #[test]

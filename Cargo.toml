@@ -1,7 +1,7 @@
 [package]
 name = "rup"
 description = "rup is a universal pinger"
-version = "0.15.1"
+version = "0.16.0"
 repository = "https://github.com/svart/rup"
 authors = ["Dmitry Shinkaruk <dimashink@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -22,10 +22,21 @@ strip = true
 
 [dependencies]
 clap = "4"
+http-body-util = { version = "0.1.5", optional = true }
+hyper = { version = "1.12.0", default-features = false, features = ["client", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"], optional = true }
 libc = "0.2"
 serde_json = "1"
 socket2 = { version = "0.6.4", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "signal", "sync", "net", "io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+webpki-roots = { version = "1.0.10", optional = true }
 
 [dev-dependencies]
+hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
 tokio = { version = "1", features = ["test-util"] }
+
+[features]
+default = ["http"]
+# HTTP/1.1 and HTTP/2 transports, with HTTPS via rustls and the bundled Mozilla root store.
+http = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio-rustls", "dep:webpki-roots"]

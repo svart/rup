@@ -1,6 +1,6 @@
 # rup
 
-Universal RTT measurement over UDP, TCP, and ICMP. `rup` is both a CLI tool and
+Universal RTT measurement over UDP, TCP, ICMP, and HTTP(S). `rup` is both a CLI tool and
 a Rust library.
 
 ## Quick Start
@@ -27,10 +27,15 @@ rup -p udp --tos 184 -n 5 127.0.0.1:5000
 # each TCP connect outcome (including RST and ICMP-derived errors).
 rup -p tcp server 127.0.0.1:5000
 rup -p tcp -n 5 127.0.0.1:5000
+
+# HTTP measures GET until the full response is read. http1 (alias http) uses a
+# new connection per request; http2 reuses one connection.
+rup --protocol=http https://example.com
+rup -p http2 https://example.com/status
 ```
 
 UDP/TCP addresses require `host:port`. ICMP accepts `host` or `host:port`; the
-port is ignored.
+port is ignored. HTTP protocols take a URL; the port defaults from the scheme.
 
 Terminal network responses are included in received packets and RTT statistics.
 Human output labels them as terminal responses; JSONL uses `terminal_reply`
@@ -80,6 +85,17 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
+
+## Features
+
+`http` (default) enables the HTTP transports and their dependencies (hyper,
+rustls with ring, webpki-roots). Build without it to keep the crate lean:
+
+```toml
+rup = { git = "https://github.com/svart/rup", default-features = false }
+```
+
+Without the feature, `http1`/`http2` sessions fail with `ErrorKind::Unsupported`.
 
 ## Docs
 

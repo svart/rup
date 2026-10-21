@@ -5,6 +5,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::pinger::{Entry, Request, Response, StatEntry};
 
+// Optional transports keep their public API in a dependency-free stub under
+// `disabled/`, so callers compile unchanged when the feature is off.
+#[cfg_attr(not(feature = "http"), path = "disabled/async_http.rs")]
+pub mod async_http;
 pub mod async_icmp;
 pub mod async_tcp;
 pub mod async_udp;

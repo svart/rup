@@ -1,18 +1,24 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::http_target::HttpVersion;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Protocol {
     Udp,
     Tcp,
     Icmp,
+    Http1,
+    Http2,
 }
 
 impl Protocol {
-    pub const VALUES: [&'static str; 3] = [
+    pub const VALUES: [&'static str; 5] = [
         Protocol::Tcp.as_str(),
         Protocol::Udp.as_str(),
         Protocol::Icmp.as_str(),
+        Protocol::Http1.as_str(),
+        Protocol::Http2.as_str(),
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -20,6 +26,16 @@ impl Protocol {
             Protocol::Udp => "udp",
             Protocol::Tcp => "tcp",
             Protocol::Icmp => "icmp",
+            Protocol::Http1 => "http1",
+            Protocol::Http2 => "http2",
+        }
+    }
+
+    pub const fn http_version(self) -> Option<HttpVersion> {
+        match self {
+            Protocol::Http1 => Some(HttpVersion::Http1),
+            Protocol::Http2 => Some(HttpVersion::Http2),
+            Protocol::Udp | Protocol::Tcp | Protocol::Icmp => None,
         }
     }
 
@@ -42,6 +58,8 @@ impl FromStr for Protocol {
             "udp" => Ok(Protocol::Udp),
             "tcp" => Ok(Protocol::Tcp),
             "icmp" => Ok(Protocol::Icmp),
+            "http" | "http1" => Ok(Protocol::Http1),
+            "http2" => Ok(Protocol::Http2),
             _ => Err(format!("unknown protocol: {s}")),
         }
     }
@@ -56,6 +74,20 @@ mod tests {
         assert_eq!("udp".parse::<Protocol>().unwrap(), Protocol::Udp);
         assert_eq!("tcp".parse::<Protocol>().unwrap(), Protocol::Tcp);
         assert_eq!("icmp".parse::<Protocol>().unwrap(), Protocol::Icmp);
+        assert_eq!("http1".parse::<Protocol>().unwrap(), Protocol::Http1);
+        assert_eq!("http2".parse::<Protocol>().unwrap(), Protocol::Http2);
+    }
+
+    #[test]
+    fn http_is_an_alias_for_http1() {
+        assert_eq!("http".parse::<Protocol>().unwrap(), Protocol::Http1);
+    }
+
+    #[test]
+    fn http_version_matches_http_protocols() {
+        assert_eq!(Protocol::Http1.http_version(), Some(HttpVersion::Http1));
+        assert_eq!(Protocol::Http2.http_version(), Some(HttpVersion::Http2));
+        assert_eq!(Protocol::Tcp.http_version(), None);
     }
 
     #[test]
@@ -78,6 +110,8 @@ mod tests {
         assert!(Protocol::Udp.requires_port());
         assert!(Protocol::Tcp.requires_port());
         assert!(!Protocol::Icmp.requires_port());
+        assert!(!Protocol::Http1.requires_port());
+        assert!(!Protocol::Http2.requires_port());
     }
 
     #[test]

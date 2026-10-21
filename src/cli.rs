@@ -50,7 +50,7 @@ fn cli() -> Command {
         .arg_required_else_help(true)
         .arg(
             Arg::new(ARG_REMOTE_ADDRESS)
-                .help("Where to send echo requests (host:port)")
+                .help("Where to send echo requests (host:port, or URL for http1/http2)")
                 .action(ArgAction::Set)
                 .required(true),
         )
@@ -156,7 +156,7 @@ fn cli() -> Command {
             Arg::new(ARG_PROTOCOL)
                 .long("protocol")
                 .short('p')
-                .help("Set protocol to use for ping")
+                .help("Set protocol to use for ping: icmp, udp, tcp, http1 (alias http), http2")
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(Protocol)),
         )
@@ -488,6 +488,29 @@ mod tests {
         assert_eq!(
             *matches.get_one::<Protocol>("protocol").unwrap(),
             Protocol::Icmp
+        );
+    }
+
+    #[test]
+    fn cli_protocol_flag_http_url() {
+        let params =
+            get_cli_params_from(["rup", "--protocol=http", "https://example.com"]).unwrap();
+
+        match params {
+            CliParams::PingerParams(params) => {
+                assert_eq!(params.protocol, Protocol::Http1);
+                assert_eq!(params.remote_address, "https://example.com");
+            }
+            _ => panic!("expected pinger params"),
+        }
+    }
+
+    #[test]
+    fn cli_protocol_flag_http2() {
+        let matches = matches(["rup", "-p", "http2", "https://example.com"]);
+        assert_eq!(
+            *matches.get_one::<Protocol>("protocol").unwrap(),
+            Protocol::Http2
         );
     }
 

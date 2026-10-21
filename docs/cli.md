@@ -10,7 +10,7 @@ Commands:
   server  Receive requests and send them back immediately
 
 Options:
-  -p, --protocol <protocol>  udp, tcp, or icmp
+  -p, --protocol <protocol>  icmp, udp, tcp, http1 (alias http), or http2
 ```
 
 `-p` / `--protocol` is a root option. When used with `server`, it must appear
@@ -54,7 +54,23 @@ rup -p udp --tos 184 127.0.0.1:5000
 
 # Five-second ICMP burst with a 50 ms interval.
 rup -i 50 -t 5 8.8.8.8
+
+# HTTPS GET with a new connection per request, then over one HTTP/2 connection.
+rup --protocol=http https://example.com
+rup -p http2 -n 10 https://example.com/status
 ```
+
+`http1` (alias `http`) and `http2` send `GET` to a URL and measure the time
+until the full response body is read. HTTP/1.1 opens a new connection per
+request, so its RTT includes TCP connect and the TLS handshake. HTTP/2 keeps
+one persistent connection, multiplexes requests over it, and reconnects when
+the server closes it. Before measuring, both send one unmeasured `GET`, so DNS,
+TLS, and missing HTTP/2 support fail immediately with an error. Any HTTP status
+counts as a reply; redirects are not followed. HTTPS verifies certificates
+against the bundled Mozilla root store (`webpki-roots`).
+`--request-size` and `--response-size` do not apply to HTTP. The reply size is
+the response body plus the status line and headers counted in HTTP/1.1 text
+form.
 
 Ctrl+C stops generation of new requests, allows already-sent requests to reply
 or time out, and then emits the normal human or JSONL summary.
@@ -74,7 +90,8 @@ datagram with no terminal response still times out normally.
 
 An open TCP service that does not speak the rup echo protocol is treated as an
 echo server and can therefore time out after accepting the connection. ICMP
-mode does not use a server: the remote kernel responds to echo requests.
+mode does not use a server: the remote kernel responds to echo requests. HTTP
+protocols use any HTTP server, so `rup` has no HTTP server mode.
 
 For UDP, the server reflects the received TOS / traffic class byte on echo
 responses when the operating system supplies that packet metadata. TCP and ICMP
@@ -94,6 +111,9 @@ rup -p tcp server 0.0.0.0:5000
   or `google.com`.
 - IPv6 socket addresses should use brackets when a port is present, for example
   `[::1]:5000`.
+- HTTP protocols take an `http://` or `https://` URL, for example
+  `https://example.com/status`. The port defaults to 80 or 443, a URL without
+  a scheme uses `http`, and IPv6 hosts must be bracketed.
 
 ## Output
 

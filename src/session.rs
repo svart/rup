@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::http_target::HttpTarget;
 use crate::pinger::{self, PacketSize, SendMode};
 use crate::protocol::Protocol;
 use crate::statistics;
+use crate::transport::async_http::HttpClientTransport;
 use crate::transport::async_icmp::IcmpClientTransport;
 use crate::transport::async_tcp::TcpClientTransport;
 use crate::transport::async_udp::UdpClientTransport;
@@ -62,7 +64,16 @@ pub fn has_port(addr: &str) -> bool {
     }
 }
 
+/// Returns `addr` as `host:port` for DNS resolution.
+///
+/// For HTTP protocols `addr` is a URL and the port defaults from its scheme.
 pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
+    if protocol.http_version().is_some() {
+        return addr
+            .parse::<HttpTarget>()
+            .map(|target| target.host_port())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e));
+    }
     if has_port(addr) {
         return Ok(addr.to_string());
     }
@@ -302,6 +313,11 @@ impl Pinger {
         self
     }
 
+    pub fn http_target(mut self, target: HttpTarget) -> Self {
+        self.config = self.config.http_target(target);
+        self
+    }
+
     pub async fn run(self) -> io::Result<PingReport> {
         run_ping_session(self.config).await
     }
@@ -320,6 +336,7 @@ pub struct PingConfig {
     traffic_class: Option<TrafficClass>,
     count: Option<u64>,
     run_time: Option<Duration>,
+    http_target: Option<HttpTarget>,
 }
 
 impl PingConfig {
@@ -336,6 +353,7 @@ impl PingConfig {
             traffic_class: None,
             count: None,
             run_time: None,
+            http_target: None,
         }
     }
 
@@ -381,6 +399,14 @@ impl PingConfig {
 
     pub fn run_time(mut self, duration: Duration) -> Self {
         self.run_time = Some(duration);
+        self
+    }
+
+    /// URL requested by HTTP protocols; defaults to `http://<remote>/`.
+    ///
+    /// `remote` must be the resolved address of the target host.
+    pub fn http_target(mut self, target: HttpTarget) -> Self {
+        self.http_target = Some(target);
         self
     }
 }
@@ -431,6 +457,26 @@ async fn spawn_ping_session(
             let transport =
                 IcmpClientTransport::new_with_tos(config.local, remote_addr, config.traffic_class)
                     .await?;
+            Ok(spawn_ping_with_transport(transport, config, events, stop))
+        }
+        Protocol::Http1 | Protocol::Http2 => {
+            let version = config
+                .protocol
+                .http_version()
+                .expect("HTTP protocols have a version");
+            let target = config
+                .http_target
+                .clone()
+                .unwrap_or_else(|| HttpTarget::from_socket_addr(remote_addr));
+            let transport = HttpClientTransport::connect(
+                version,
+                config.local,
+                remote_addr,
+                config.traffic_class,
+                target,
+                config.timeout,
+            )
+            .await?;
             Ok(spawn_ping_with_transport(transport, config, events, stop))
         }
     }
@@ -627,10 +673,10 @@ pub async fn run_server_until(
     match protocol {
         Protocol::Tcp => transport::async_tcp::server_transport_until(local, shutdown).await?,
         Protocol::Udp => transport::async_udp::server_transport_until(local, shutdown).await?,
-        Protocol::Icmp => {
+        Protocol::Icmp | Protocol::Http1 | Protocol::Http2 => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "there is no server for ICMP",
+                format!("there is no server for {protocol}"),
             ));
         }
     }
@@ -909,6 +955,24 @@ mod tests {
     }
 
     #[test]
+    fn ensure_port_uses_http_url_host_and_default_port() {
+        assert_eq!(
+            ensure_port("https://example.com/path", Protocol::Http2).unwrap(),
+            "example.com:443"
+        );
+        assert_eq!(
+            ensure_port("http://[::1]:8080", Protocol::Http1).unwrap(),
+            "[::1]:8080"
+        );
+        assert_eq!(
+            ensure_port("ftp://example.com", Protocol::Http1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
     fn ensure_port_errors_for_udp_without_port() {
         assert!(ensure_port("localhost", Protocol::Udp).is_err());
     }
@@ -973,6 +1037,7 @@ mod tests {
             traffic_class: None,
             count: Some(3),
             run_time: None,
+            http_target: None,
         })
         .await
         .unwrap();
@@ -1006,6 +1071,7 @@ mod tests {
             traffic_class: None,
             count: Some(1),
             run_time: None,
+            http_target: None,
         })
         .await
         .unwrap();
@@ -1037,6 +1103,7 @@ mod tests {
             traffic_class: None,
             count: Some(1),
             run_time: None,
+            http_target: None,
         })
         .await
         .unwrap();
@@ -1080,6 +1147,7 @@ mod tests {
             traffic_class: None,
             count: Some(2),
             run_time: None,
+            http_target: None,
         })
         .await
         .unwrap();
@@ -1109,6 +1177,7 @@ mod tests {
             traffic_class: None,
             count: Some(2),
             run_time: None,
+            http_target: None,
         })
         .await
         .unwrap();
@@ -1134,6 +1203,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(3),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1161,6 +1231,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(1),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1186,6 +1257,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(1),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1214,6 +1286,7 @@ mod tests {
                     traffic_class: None,
                     count: Some(count),
                     run_time: None,
+                    http_target: None,
                 },
                 None,
             ),
@@ -1243,6 +1316,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(2),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1270,6 +1344,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(1),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1299,6 +1374,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(1),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1328,6 +1404,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(10),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1356,6 +1433,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(3),
                 run_time: None,
+                http_target: None,
             },
             None,
         )
@@ -1382,6 +1460,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(2),
                 run_time: None,
+                http_target: None,
             },
         );
 
@@ -1420,6 +1499,7 @@ mod tests {
                 traffic_class: None,
                 count: None,
                 run_time: None,
+                http_target: None,
             },
         );
 
@@ -1457,6 +1537,7 @@ mod tests {
                 traffic_class: None,
                 count: Some(10),
                 run_time: None,
+                http_target: None,
             },
         );
 

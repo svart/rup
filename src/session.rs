@@ -644,8 +644,7 @@ pub async fn run_server_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pinger::PING_HDR_LEN;
-    use crate::{Request, Response, echo_codec};
+    use crate::{Request, Response};
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Instant;
@@ -832,36 +831,67 @@ mod tests {
         assert_eq!(pinger.local, "[::]:0".parse().unwrap());
     }
 
+    /// Starts the rup echo server on a free loopback port.
+    async fn spawn_rup_server(
+        protocol: Protocol,
+    ) -> (
+        SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let address = match protocol {
+            Protocol::Udp => std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()),
+            _ => std::net::TcpListener::bind("127.0.0.1:0").and_then(|s| s.local_addr()),
+        }
+        .unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(run_server_until(protocol, address, async {
+            let _ = shutdown_rx.await;
+        }));
+        // The current-thread test runtime polls the server task here, and it
+        // binds before its first await point that can pend.
+        tokio::task::yield_now().await;
+        (address, shutdown_tx, server)
+    }
+
     #[tokio::test]
-    async fn pinger_run_udp_loopback_report() {
-        use tokio::net::UdpSocket;
+    async fn pinger_against_rup_server_echoes_requested_sizes() {
+        let request_size = PacketSize::new(40).unwrap();
+        let response_size = PacketSize::new(100).unwrap();
 
-        let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = server_sock.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let mut buf = vec![0; u16::MAX as usize];
-            for _ in 0..3 {
-                let (n, addr) = server_sock.recv_from(&mut buf).await.unwrap();
-                server_sock.send_to(&buf[..n], addr).await.unwrap();
-            }
-        });
-
-        let report = Pinger::new(Target::Udp(server_addr))
-            .session(
-                SessionConfig::default()
+        for protocol in [Protocol::Udp, Protocol::Tcp] {
+            for (requested_response, expected_size) in [(None, 40), (Some(response_size), 100)] {
+                let (address, shutdown, server) = spawn_rup_server(protocol).await;
+                let target = match protocol {
+                    Protocol::Udp => Target::Udp(address),
+                    _ => Target::Tcp(address),
+                };
+                let mut config = SessionConfig::default()
                     .interval(Duration::from_millis(1))
-                    .timeout(Duration::from_millis(100))
-                    .count(3),
-            )
-            .run()
-            .await
-            .unwrap();
+                    .timeout(Duration::from_millis(500))
+                    .request_size(request_size)
+                    .count(3);
+                if let Some(size) = requested_response {
+                    config = config.response_size(size);
+                }
 
-        assert_eq!(report.sent, 3);
-        assert_eq!(report.received, 3);
-        assert_eq!(report.rtts.len(), 3);
-        server.await.unwrap();
+                let mut session = Pinger::new(target).session(config).start().await.unwrap();
+                let mut sizes = Vec::new();
+                while let Some(event) = session.next().await {
+                    match event {
+                        PingEvent::Reply(result) => sizes.push(result.size),
+                        other => panic!("{protocol}: unexpected {other:?}"),
+                    }
+                }
+                let report = session.report().await.unwrap();
+
+                assert_eq!(sizes, vec![expected_size; 3], "{protocol}");
+                assert_eq!(report.sent, 3);
+                assert_eq!(report.received, 3);
+                shutdown.send(()).unwrap();
+                server.await.unwrap().unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -915,44 +945,6 @@ mod tests {
         assert_eq!(report.sent, 1);
         assert_eq!(report.received, 1);
         assert_eq!(report.loss_pct(), 0.0);
-    }
-
-    #[tokio::test]
-    async fn pinger_run_tcp_loopback_report() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            for _ in 0..2 {
-                let mut hdr = [0; PING_HDR_LEN];
-                stream.read_exact(&mut hdr).await.unwrap();
-                let echo = echo_codec::decode_header(&hdr).unwrap();
-                if echo.len as usize > PING_HDR_LEN {
-                    let mut extra = vec![0; echo.len as usize - PING_HDR_LEN];
-                    stream.read_exact(&mut extra).await.unwrap();
-                }
-                stream.write_all(&hdr).await.unwrap();
-            }
-        });
-
-        let report = Pinger::new(Target::Tcp(server_addr))
-            .session(
-                SessionConfig::default()
-                    .interval(Duration::from_millis(1))
-                    .timeout(Duration::from_millis(100))
-                    .count(2),
-            )
-            .run()
-            .await
-            .unwrap();
-
-        assert_eq!(report.sent, 2);
-        assert_eq!(report.received, 2);
-        server.await.unwrap();
     }
 
     #[tokio::test]

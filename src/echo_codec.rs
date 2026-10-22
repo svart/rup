@@ -167,4 +167,29 @@ mod tests {
         assert_eq!(response.size, 40);
         assert_eq!(response.ttl, None);
     }
+
+    #[test]
+    fn encode_response_moves_requested_size_into_len_and_clears_it() {
+        let response = encode_response(
+            decode_header(&encode_request(&request(5, Some(40), Some(100)))).unwrap(),
+        );
+        let echo = decode_header(&response).unwrap();
+
+        assert_eq!(response.len(), 100);
+        assert_eq!(&response[PING_HDR_LEN..], &[0; 100 - PING_HDR_LEN]);
+        assert_eq!(echo.id, 5);
+        assert_eq!(echo.len, 100);
+        assert_eq!(echo.resp_size, 0);
+    }
+
+    #[test]
+    fn encode_response_mirrors_request_length_without_requested_size() {
+        let response =
+            encode_response(decode_header(&encode_request(&request(6, Some(40), None))).unwrap());
+        let echo = decode_header(&response).unwrap();
+
+        assert_eq!(response.len(), 40);
+        assert_eq!(echo.len, 40);
+        assert_eq!(echo.resp_size, 0);
+    }
 }

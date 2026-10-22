@@ -211,7 +211,7 @@ variable-length responses.
 ```sh
 cargo build                # debug build
 cargo build --release      # release build
-cargo test                 # 230+ tests (lib + bin + integration)
+cargo test                 # lib + bin + integration tests
 cargo clippy               # must pass before committing (zero warnings)
 ```
 

@@ -373,7 +373,7 @@ mod tests {
     use hyper::service::service_fn;
     use tokio::net::TcpListener;
 
-    use crate::{PingConfig, Protocol};
+    use crate::{Pinger, Protocol, SessionConfig, Target};
 
     const BODY: &str = "hello";
 
@@ -588,11 +588,17 @@ mod tests {
             (Protocol::Http2, HttpVersion::Http2),
         ] {
             let server = spawn_server(version, usize::MAX).await;
-            let report = crate::run_ping_session(
-                PingConfig::new(server.address, protocol)
+            let report = Pinger::new(Target::Http {
+                version,
+                remote: server.address,
+                url: HttpTarget::from_socket_addr(server.address),
+            })
+            .session(
+                SessionConfig::default()
                     .count(3)
                     .interval(Duration::from_millis(10)),
             )
+            .run()
             .await
             .unwrap();
 

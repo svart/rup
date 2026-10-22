@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::http_target::HttpTarget;
+use crate::http_target::{HttpTarget, HttpVersion};
 use crate::pinger::{self, PacketSize, SendMode};
 use crate::protocol::Protocol;
 use crate::statistics;
@@ -240,128 +240,57 @@ impl PingSession {
     }
 }
 
-/// High-level builder for quick ping sessions.
-///
-/// # Example
-///
-/// ```no_run
-/// use rup::{Pinger, Protocol};
-///
-/// # async fn example() -> std::io::Result<()> {
-/// let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
-///     .count(5)
-///     .interval(std::time::Duration::from_secs(1))
-///     .run()
-///     .await?;
-/// println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max());
-/// # Ok(())
-/// # }
-/// ```
-pub struct Pinger {
-    config: PingConfig,
+/// Destination of a ping session, with the data that its transport needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Target {
+    Udp(SocketAddr),
+    Tcp(SocketAddr),
+    /// The port is ignored.
+    Icmp(SocketAddr),
+    /// `GET` requests for `url`; `remote` is the resolved address of the URL host.
+    Http {
+        version: HttpVersion,
+        remote: SocketAddr,
+        url: HttpTarget,
+    },
 }
 
-impl Pinger {
-    pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
-        Pinger {
-            config: PingConfig::new(remote, protocol),
+impl Target {
+    fn remote(&self) -> SocketAddr {
+        match self {
+            Target::Udp(remote) | Target::Tcp(remote) | Target::Icmp(remote) => *remote,
+            Target::Http { remote, .. } => *remote,
         }
     }
-
-    pub fn count(mut self, n: u64) -> Self {
-        self.config = self.config.count(n);
-        self
-    }
-
-    pub fn interval(mut self, interval: Duration) -> Self {
-        self.config = self.config.interval(interval);
-        self
-    }
-
-    pub fn adaptive(mut self) -> Self {
-        self.config = self.config.adaptive();
-        self
-    }
-
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.config = self.config.timeout(timeout);
-        self
-    }
-
-    pub fn request_size(mut self, size: PacketSize) -> Self {
-        self.config = self.config.request_size(size);
-        self
-    }
-
-    pub fn response_size(mut self, size: PacketSize) -> Self {
-        self.config = self.config.response_size(size);
-        self
-    }
-
-    pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
-        self.config = self.config.traffic_class(traffic_class);
-        self
-    }
-
-    pub fn local(mut self, addr: SocketAddr) -> Self {
-        self.config = self.config.local_address(addr);
-        self
-    }
-
-    pub fn run_time(mut self, dur: Duration) -> Self {
-        self.config = self.config.run_time(dur);
-        self
-    }
-
-    pub fn http_target(mut self, target: HttpTarget) -> Self {
-        self.config = self.config.http_target(target);
-        self
-    }
-
-    pub async fn run(self) -> io::Result<PingReport> {
-        run_ping_session(self.config).await
-    }
 }
 
+/// Transport-independent session settings: request schedule, sizes, and reply timeout.
 #[derive(Clone, Debug)]
-pub struct PingConfig {
-    remote: SocketAddr,
-    local: SocketAddr,
-    protocol: Protocol,
+pub struct SessionConfig {
     interval: Duration,
     adaptive: bool,
     timeout: Duration,
     request_size: Option<PacketSize>,
     response_size: Option<PacketSize>,
-    traffic_class: Option<TrafficClass>,
     count: Option<u64>,
     run_time: Option<Duration>,
-    http_target: Option<HttpTarget>,
 }
 
-impl PingConfig {
-    pub fn new(remote: SocketAddr, protocol: Protocol) -> Self {
+impl Default for SessionConfig {
+    fn default() -> Self {
         Self {
-            remote,
-            local: unspecified_address(remote),
-            protocol,
             interval: Duration::from_millis(1000),
             adaptive: false,
             timeout: Duration::from_millis(1000),
             request_size: None,
             response_size: None,
-            traffic_class: None,
             count: None,
             run_time: None,
-            http_target: None,
         }
     }
+}
 
-    pub fn local_address(mut self, address: SocketAddr) -> Self {
-        self.local = address;
-        self
-    }
-
+impl SessionConfig {
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
@@ -387,11 +316,6 @@ impl PingConfig {
         self
     }
 
-    pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
-        self.traffic_class = Some(traffic_class);
-        self
-    }
-
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
@@ -401,26 +325,95 @@ impl PingConfig {
         self.run_time = Some(duration);
         self
     }
+}
 
-    /// URL requested by HTTP protocols; defaults to `http://<remote>/`.
-    ///
-    /// `remote` must be the resolved address of the target host.
-    pub fn http_target(mut self, target: HttpTarget) -> Self {
-        self.http_target = Some(target);
+/// Builder for ping sessions over the built-in transports.
+///
+/// # Example
+///
+/// ```no_run
+/// use rup::{Pinger, SessionConfig, Target};
+///
+/// # async fn example() -> std::io::Result<()> {
+/// let session = SessionConfig::default()
+///     .count(5)
+///     .interval(std::time::Duration::from_secs(1));
+/// let report = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()))
+///     .session(session)
+///     .run()
+///     .await?;
+/// println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max());
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Pinger {
+    target: Target,
+    local: SocketAddr,
+    traffic_class: Option<TrafficClass>,
+    session: SessionConfig,
+}
+
+impl Pinger {
+    pub fn new(target: Target) -> Self {
+        Pinger {
+            local: unspecified_address(target.remote()),
+            target,
+            traffic_class: None,
+            session: SessionConfig::default(),
+        }
+    }
+
+    pub fn local(mut self, addr: SocketAddr) -> Self {
+        self.local = addr;
         self
+    }
+
+    pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
+        self.traffic_class = Some(traffic_class);
+        self
+    }
+
+    pub fn session(mut self, session: SessionConfig) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// Runs the session to completion and returns its report.
+    pub async fn run(self) -> io::Result<PingReport> {
+        let report = spawn_ping_session(self, None, None).await?;
+        wait_ping_report(report).await
+    }
+
+    /// Connects and returns a session that yields live events.
+    pub async fn start(self) -> io::Result<PingSession> {
+        let (events_send, events_recv) = mpsc::channel(CHANNEL_CAP);
+        let (stop_send, stop_recv) = oneshot::channel();
+        let report = spawn_ping_session(self, Some(events_send), Some(stop_recv)).await?;
+        Ok(PingSession::new(events_recv, report, stop_send))
     }
 }
 
-pub async fn run_ping_session(config: PingConfig) -> io::Result<PingReport> {
-    let report = spawn_ping_session(config, None, None).await?;
-    wait_ping_report(report).await
+/// Runs a session over a caller-provided transport and returns its report.
+pub async fn run_with_transport<T>(transport: T, session: SessionConfig) -> io::Result<PingReport>
+where
+    T: Transport + Clone + Send + 'static,
+{
+    run_session(transport, session, None, None).await
 }
 
-pub async fn start_ping_session(config: PingConfig) -> io::Result<PingSession> {
+/// Starts a session over a caller-provided transport. Must be called within a Tokio runtime.
+pub fn start_with_transport<T>(transport: T, session: SessionConfig) -> PingSession
+where
+    T: Transport + Clone + Send + 'static,
+{
     let (events_send, events_recv) = mpsc::channel(CHANNEL_CAP);
     let (stop_send, stop_recv) = oneshot::channel();
-    let report = spawn_ping_session(config, Some(events_send), Some(stop_recv)).await?;
-    Ok(PingSession::new(events_recv, report, stop_send))
+    PingSession::new(
+        events_recv,
+        spawn_ping_with_transport(transport, session, Some(events_send), Some(stop_recv)),
+        stop_send,
+    )
 }
 
 async fn wait_ping_report(report: JoinHandle<io::Result<PingReport>>) -> io::Result<PingReport> {
@@ -430,54 +423,47 @@ async fn wait_ping_report(report: JoinHandle<io::Result<PingReport>>) -> io::Res
 }
 
 async fn spawn_ping_session(
-    config: PingConfig,
+    pinger: Pinger,
     events: Option<mpsc::Sender<PingEvent>>,
     stop: Option<oneshot::Receiver<()>>,
 ) -> io::Result<JoinHandle<io::Result<PingReport>>> {
-    let remote_addr = config.remote;
+    let Pinger {
+        target,
+        local,
+        traffic_class,
+        session,
+    } = pinger;
 
-    match config.protocol {
-        Protocol::Udp => {
+    match target {
+        Target::Udp(remote) => {
+            let transport = UdpClientTransport::new_with_tos(local, remote, traffic_class).await?;
+            Ok(spawn_ping_with_transport(transport, session, events, stop))
+        }
+        Target::Tcp(remote) => {
             let transport =
-                UdpClientTransport::new_with_tos(config.local, remote_addr, config.traffic_class)
+                TcpClientTransport::connect_or_probe(local, remote, traffic_class, session.timeout)
                     .await?;
-            Ok(spawn_ping_with_transport(transport, config, events, stop))
+            Ok(spawn_ping_with_transport(transport, session, events, stop))
         }
-        Protocol::Tcp => {
-            let transport = TcpClientTransport::connect_or_probe(
-                config.local,
-                remote_addr,
-                config.traffic_class,
-                config.timeout,
-            )
-            .await?;
-            Ok(spawn_ping_with_transport(transport, config, events, stop))
+        Target::Icmp(remote) => {
+            let transport = IcmpClientTransport::new_with_tos(local, remote, traffic_class).await?;
+            Ok(spawn_ping_with_transport(transport, session, events, stop))
         }
-        Protocol::Icmp => {
-            let transport =
-                IcmpClientTransport::new_with_tos(config.local, remote_addr, config.traffic_class)
-                    .await?;
-            Ok(spawn_ping_with_transport(transport, config, events, stop))
-        }
-        Protocol::Http1 | Protocol::Http2 => {
-            let version = config
-                .protocol
-                .http_version()
-                .expect("HTTP protocols have a version");
-            let target = config
-                .http_target
-                .clone()
-                .unwrap_or_else(|| HttpTarget::from_socket_addr(remote_addr));
+        Target::Http {
+            version,
+            remote,
+            url,
+        } => {
             let transport = HttpClientTransport::connect(
                 version,
-                config.local,
-                remote_addr,
-                config.traffic_class,
-                target,
-                config.timeout,
+                local,
+                remote,
+                traffic_class,
+                url,
+                session.timeout,
             )
             .await?;
-            Ok(spawn_ping_with_transport(transport, config, events, stop))
+            Ok(spawn_ping_with_transport(transport, session, events, stop))
         }
     }
 }
@@ -492,47 +478,19 @@ fn unspecified_address(remote: SocketAddr) -> SocketAddr {
 
 fn spawn_ping_with_transport<T>(
     transport: T,
-    config: PingConfig,
+    session: SessionConfig,
     events: Option<mpsc::Sender<PingEvent>>,
     stop: Option<oneshot::Receiver<()>>,
 ) -> JoinHandle<io::Result<PingReport>>
 where
     T: Transport + Clone + Send + 'static,
 {
-    tokio::spawn(run_ping_with_transport_until_stop(
-        transport, config, events, stop,
-    ))
+    tokio::spawn(run_session(transport, session, events, stop))
 }
 
-#[cfg(test)]
-fn start_ping_with_transport<T>(transport: T, config: PingConfig) -> PingSession
-where
-    T: Transport + Clone + Send + 'static,
-{
-    let (events_send, events_recv) = mpsc::channel(CHANNEL_CAP);
-    let (stop_send, stop_recv) = oneshot::channel();
-    PingSession::new(
-        events_recv,
-        spawn_ping_with_transport(transport, config, Some(events_send), Some(stop_recv)),
-        stop_send,
-    )
-}
-
-#[cfg(test)]
-async fn run_ping_with_transport<T>(
+async fn run_session<T>(
     transport: T,
-    config: PingConfig,
-    events: Option<mpsc::Sender<PingEvent>>,
-) -> io::Result<PingReport>
-where
-    T: Transport + Clone + Send + 'static,
-{
-    run_ping_with_transport_until_stop(transport, config, events, None).await
-}
-
-async fn run_ping_with_transport_until_stop<T>(
-    transport: T,
-    config: PingConfig,
+    session: SessionConfig,
     events: Option<mpsc::Sender<PingEvent>>,
     stop: Option<oneshot::Receiver<()>>,
 ) -> io::Result<PingReport>
@@ -540,13 +498,13 @@ where
     T: Transport + Clone + Send + 'static,
 {
     let channels = SessionChannels::new();
-    let expected_requests = config.count;
+    let expected_requests = session.count;
 
-    let (send_mode, txtr_gen) = if config.adaptive {
+    let (send_mode, txtr_gen) = if session.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(CHANNEL_CAP);
         (SendMode::Adaptive(txtr_gen_recv), Some(txtr_gen_send))
     } else {
-        (SendMode::Interval(config.interval), None)
+        (SendMode::Interval(session.interval), None)
     };
 
     let (sends_done_send, sends_done_recv) = mpsc::channel(1);
@@ -571,10 +529,10 @@ where
 
     let generator_config = pinger::GeneratorConfig {
         send_mode,
-        ping_number: config.count,
-        run_time: config.run_time,
-        request_size: config.request_size,
-        response_size: config.response_size,
+        ping_number: session.count,
+        run_time: session.run_time,
+        request_size: session.request_size,
+        response_size: session.response_size,
     };
     let generator_task = tasks.spawn(async move {
         let run = pinger::generator(channels.generator_to_transmitter, generator_config);
@@ -596,7 +554,7 @@ where
                     channels.statista_input,
                     sends_done_recv,
                     txtr_gen,
-                    config.timeout,
+                    session.timeout,
                     events,
                 )
                 .await,
@@ -609,7 +567,7 @@ where
                     channels.statista_input,
                     sends_done_recv,
                     txtr_gen,
-                    config.timeout,
+                    session.timeout,
                 )
                 .await,
             )
@@ -993,25 +951,28 @@ mod tests {
     }
 
     #[test]
-    fn ping_config_new_uses_resolved_socket_address() {
-        let remote = "127.0.0.1:5000".parse().unwrap();
-        let config = PingConfig::new(remote, Protocol::Udp);
-
-        assert_eq!(config.remote, remote);
-        assert_eq!(config.protocol, Protocol::Udp);
-    }
-
-    #[test]
-    fn ping_config_default_local_address_matches_remote_family() {
-        let ipv4 = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp);
-        let ipv6 = PingConfig::new("[::1]:5000".parse().unwrap(), Protocol::Udp);
+    fn pinger_default_local_address_matches_remote_family() {
+        let ipv4 = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()));
+        let ipv6 = Pinger::new(Target::Udp("[::1]:5000".parse().unwrap()));
 
         assert_eq!(ipv4.local, "0.0.0.0:0".parse().unwrap());
         assert_eq!(ipv6.local, "[::]:0".parse().unwrap());
     }
 
+    #[test]
+    fn pinger_default_local_address_uses_http_remote_family() {
+        let remote = "[::1]:8080".parse().unwrap();
+        let pinger = Pinger::new(Target::Http {
+            version: HttpVersion::Http2,
+            remote,
+            url: HttpTarget::from_socket_addr(remote),
+        });
+
+        assert_eq!(pinger.local, "[::]:0".parse().unwrap());
+    }
+
     #[tokio::test]
-    async fn run_ping_session_udp_loopback_report() {
+    async fn pinger_run_udp_loopback_report() {
         use tokio::net::UdpSocket;
 
         let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1025,22 +986,16 @@ mod tests {
             }
         });
 
-        let report = run_ping_session(PingConfig {
-            remote: server_addr,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol: Protocol::Udp,
-            interval: Duration::from_millis(1),
-            adaptive: false,
-            timeout: Duration::from_millis(100),
-            request_size: None,
-            response_size: None,
-            traffic_class: None,
-            count: Some(3),
-            run_time: None,
-            http_target: None,
-        })
-        .await
-        .unwrap();
+        let report = Pinger::new(Target::Udp(server_addr))
+            .session(
+                SessionConfig::default()
+                    .interval(Duration::from_millis(1))
+                    .timeout(Duration::from_millis(100))
+                    .count(3),
+            )
+            .run()
+            .await
+            .unwrap();
 
         assert_eq!(report.sent, 3);
         assert_eq!(report.received, 3);
@@ -1049,7 +1004,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ping_session_udp_no_response_reports_loss() {
+    async fn pinger_run_udp_no_response_reports_loss() {
         use tokio::net::UdpSocket;
 
         let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1059,22 +1014,16 @@ mod tests {
             let _ = server_sock.recv_from(&mut buf).await;
         });
 
-        let report = run_ping_session(PingConfig {
-            remote: server_addr,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol: Protocol::Udp,
-            interval: Duration::from_millis(1),
-            adaptive: false,
-            timeout: Duration::from_millis(5),
-            request_size: None,
-            response_size: None,
-            traffic_class: None,
-            count: Some(1),
-            run_time: None,
-            http_target: None,
-        })
-        .await
-        .unwrap();
+        let report = Pinger::new(Target::Udp(server_addr))
+            .session(
+                SessionConfig::default()
+                    .interval(Duration::from_millis(1))
+                    .timeout(Duration::from_millis(5))
+                    .count(1),
+            )
+            .run()
+            .await
+            .unwrap();
 
         assert_eq!(report.sent, 1);
         assert_eq!(report.received, 0);
@@ -1084,29 +1033,23 @@ mod tests {
 
     #[tokio::test]
     #[cfg(target_os = "linux")]
-    async fn run_ping_session_udp_closed_port_uses_icmp_error() {
+    async fn pinger_run_udp_closed_port_uses_icmp_error() {
         use tokio::net::UdpSocket;
 
         let unused_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let unused_addr = unused_socket.local_addr().unwrap();
         drop(unused_socket);
 
-        let report = run_ping_session(PingConfig {
-            remote: unused_addr,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol: Protocol::Udp,
-            interval: Duration::from_millis(1),
-            adaptive: false,
-            timeout: Duration::from_millis(100),
-            request_size: None,
-            response_size: None,
-            traffic_class: None,
-            count: Some(1),
-            run_time: None,
-            http_target: None,
-        })
-        .await
-        .unwrap();
+        let report = Pinger::new(Target::Udp(unused_addr))
+            .session(
+                SessionConfig::default()
+                    .interval(Duration::from_millis(1))
+                    .timeout(Duration::from_millis(100))
+                    .count(1),
+            )
+            .run()
+            .await
+            .unwrap();
 
         assert_eq!(report.sent, 1);
         assert_eq!(report.received, 1);
@@ -1114,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ping_session_tcp_loopback_report() {
+    async fn pinger_run_tcp_loopback_report() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1135,22 +1078,16 @@ mod tests {
             }
         });
 
-        let report = run_ping_session(PingConfig {
-            remote: server_addr,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol: Protocol::Tcp,
-            interval: Duration::from_millis(1),
-            adaptive: false,
-            timeout: Duration::from_millis(100),
-            request_size: None,
-            response_size: None,
-            traffic_class: None,
-            count: Some(2),
-            run_time: None,
-            http_target: None,
-        })
-        .await
-        .unwrap();
+        let report = Pinger::new(Target::Tcp(server_addr))
+            .session(
+                SessionConfig::default()
+                    .interval(Duration::from_millis(1))
+                    .timeout(Duration::from_millis(100))
+                    .count(2),
+            )
+            .run()
+            .await
+            .unwrap();
 
         assert_eq!(report.sent, 2);
         assert_eq!(report.received, 2);
@@ -1158,29 +1095,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_ping_session_tcp_closed_port_advances_adaptive_mode() {
+    async fn pinger_run_tcp_closed_port_advances_adaptive_mode() {
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote = listener.local_addr().unwrap();
         drop(listener);
 
-        let report = run_ping_session(PingConfig {
-            remote,
-            local: "0.0.0.0:0".parse().unwrap(),
-            protocol: Protocol::Tcp,
-            interval: Duration::from_millis(1),
-            adaptive: true,
-            timeout: Duration::from_millis(100),
-            request_size: None,
-            response_size: None,
-            traffic_class: None,
-            count: Some(2),
-            run_time: None,
-            http_target: None,
-        })
-        .await
-        .unwrap();
+        let report = Pinger::new(Target::Tcp(remote))
+            .session(
+                SessionConfig::default()
+                    .interval(Duration::from_millis(1))
+                    .adaptive()
+                    .timeout(Duration::from_millis(100))
+                    .count(2),
+            )
+            .run()
+            .await
+            .unwrap();
 
         assert_eq!(report.sent, 2);
         assert_eq!(report.received, 2);
@@ -1189,23 +1121,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_reports_success() {
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             ScriptedTransport::new([0, 1, 2]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(100),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(3),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(100))
+                .count(3),
         )
         .await
         .unwrap();
@@ -1217,23 +1138,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_propagates_send_failure() {
-        let error = run_ping_with_transport(
+        let error = run_with_transport(
             SendErrorTransport,
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(1),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(1),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(1))
+                .count(1),
         )
         .await
         .unwrap_err();
@@ -1243,23 +1153,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_propagates_receive_failure() {
-        let error = run_ping_with_transport(
+        let error = run_with_transport(
             ReceiveErrorTransport,
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(1),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(1),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(1))
+                .count(1),
         )
         .await
         .unwrap_err();
@@ -1272,23 +1171,12 @@ mod tests {
         let count = 2050;
         let report = tokio::time::timeout(
             Duration::from_secs(2),
-            run_ping_with_transport(
+            run_with_transport(
                 OrderedScriptedTransport::new(0..count),
-                PingConfig {
-                    remote: "127.0.0.1:0".parse().unwrap(),
-                    local: "0.0.0.0:0".parse().unwrap(),
-                    protocol: Protocol::Udp,
-                    interval: Duration::from_millis(1000),
-                    adaptive: true,
-                    timeout: Duration::from_millis(100),
-                    request_size: None,
-                    response_size: None,
-                    traffic_class: None,
-                    count: Some(count),
-                    run_time: None,
-                    http_target: None,
-                },
-                None,
+                SessionConfig::default()
+                    .adaptive()
+                    .timeout(Duration::from_millis(100))
+                    .count(count),
             ),
         )
         .await
@@ -1302,23 +1190,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_reports_loss() {
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             ScriptedTransport::new([]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(2),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(2),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(2))
+                .count(2),
         )
         .await
         .unwrap();
@@ -1330,23 +1207,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_waits_for_delayed_final_response() {
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             DelayedScriptedTransport::new([0], Duration::from_millis(10)),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(100),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(1),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(100))
+                .count(1),
         )
         .await
         .unwrap();
@@ -1360,23 +1226,12 @@ mod tests {
     async fn run_ping_with_transport_waits_for_final_timeout() {
         let wait_time = Duration::from_millis(20);
         let started = Instant::now();
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             ScriptedTransport::new([]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: wait_time,
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(1),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(wait_time)
+                .count(1),
         )
         .await
         .unwrap();
@@ -1390,23 +1245,12 @@ mod tests {
     async fn run_ping_with_transport_waits_for_ten_sent_five_received_case() {
         let wait_time = Duration::from_millis(120);
         let started = Instant::now();
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             ScriptedTransport::new(0..5),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(10),
-                adaptive: false,
-                timeout: wait_time,
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(10),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .interval(Duration::from_millis(10))
+                .timeout(wait_time)
+                .count(10),
         )
         .await
         .unwrap();
@@ -1419,23 +1263,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_ping_with_transport_supports_adaptive_mode() {
-        let report = run_ping_with_transport(
+        let report = run_with_transport(
             ScriptedTransport::new([0, 1, 2]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1000),
-                adaptive: true,
-                timeout: Duration::from_millis(100),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(3),
-                run_time: None,
-                http_target: None,
-            },
-            None,
+            SessionConfig::default()
+                .adaptive()
+                .timeout(Duration::from_millis(100))
+                .count(3),
         )
         .await
         .unwrap();
@@ -1446,22 +1279,12 @@ mod tests {
 
     #[tokio::test]
     async fn ping_session_yields_reply_events_then_report() {
-        let mut session = start_ping_with_transport(
+        let mut session = start_with_transport(
             ScriptedTransport::new([0, 1]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(1),
-                adaptive: false,
-                timeout: Duration::from_millis(100),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(2),
-                run_time: None,
-                http_target: None,
-            },
+            SessionConfig::default()
+                .interval(Duration::from_millis(1))
+                .timeout(Duration::from_millis(100))
+                .count(2),
         );
 
         let mut events = Vec::new();
@@ -1485,22 +1308,9 @@ mod tests {
 
     #[tokio::test]
     async fn ping_session_stop_finishes_unbounded_session_with_report() {
-        let mut session = start_ping_with_transport(
+        let mut session = start_with_transport(
             ScriptedTransport::new([0]),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_secs(1),
-                adaptive: false,
-                timeout: Duration::from_millis(100),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: None,
-                run_time: None,
-                http_target: None,
-            },
+            SessionConfig::default().timeout(Duration::from_millis(100)),
         );
 
         assert!(matches!(
@@ -1523,22 +1333,12 @@ mod tests {
 
     #[tokio::test]
     async fn ping_session_reports_timeouts_for_ten_sent_five_received_case() {
-        let mut session = start_ping_with_transport(
+        let mut session = start_with_transport(
             ScriptedTransport::new(0..5),
-            PingConfig {
-                remote: "127.0.0.1:0".parse().unwrap(),
-                local: "0.0.0.0:0".parse().unwrap(),
-                protocol: Protocol::Udp,
-                interval: Duration::from_millis(10),
-                adaptive: false,
-                timeout: Duration::from_millis(120),
-                request_size: None,
-                response_size: None,
-                traffic_class: None,
-                count: Some(10),
-                run_time: None,
-                http_target: None,
-            },
+            SessionConfig::default()
+                .interval(Duration::from_millis(10))
+                .timeout(Duration::from_millis(120))
+                .count(10),
         );
 
         let mut replies = Vec::new();

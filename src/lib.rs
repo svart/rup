@@ -12,9 +12,9 @@ pub use http_target::{HttpScheme, HttpTarget, HttpVersion};
 pub use pinger::{PacketSize, PacketSizeError, Request, Response};
 pub use protocol::Protocol;
 pub use session::{
-    PingConfig, PingEvent, PingReport, PingReportError, PingResult, PingSession, Pinger,
-    TrafficClass, ensure_port, has_port, run_ping_session, run_server, run_server_until,
-    start_ping_session,
+    PingEvent, PingReport, PingReportError, PingResult, PingSession, Pinger, SessionConfig, Target,
+    TrafficClass, ensure_port, has_port, run_server, run_server_until, run_with_transport,
+    start_with_transport,
 };
 pub use transport::Transport;
 #[cfg(feature = "http")]

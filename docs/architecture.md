@@ -121,7 +121,7 @@ pub mod async_http;
 
 The stub in `src/transport/disabled/` declares the same signatures, with an
 uninhabited transport type whose constructor returns `ErrorKind::Unsupported`.
-`Protocol`, session dispatch, the CLI, and the output code therefore compile
+`Protocol`, `Target`, session dispatch, the CLI, and the output code therefore compile
 unchanged. CI builds and tests both feature sets, which catches signature drift
 between the real module and its stub.
 
@@ -131,7 +131,9 @@ between the real module and its stub.
 2. Implement `Transport` for the client transport.
 3. Register the module in `src/transport/mod.rs`.
 4. Add a `Protocol` variant and parser/display support in `src/protocol.rs`.
-5. Register client construction in `src/session.rs`.
+5. Add a `Target` variant that carries the protocol-specific data, and its
+   client construction arm in `src/session.rs`. Transport-independent settings
+   belong in `SessionConfig`.
 6. Register server support if the protocol needs a `rup` echo server.
    Otherwise, add it to the "no server" arm of `run_server_until`.
 7. If the protocol adds dependencies, put it behind a feature with a stub, as

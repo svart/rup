@@ -43,11 +43,13 @@ rup = { git = "https://github.com/svart/rup" }
 ### High-level API (easiest integration)
 
 ```rust
-use rup::{Pinger, Protocol};
+use rup::{Pinger, SessionConfig, Target};
 
-let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
+let session = SessionConfig::default()
     .count(5)
-    .interval(std::time::Duration::from_secs(1))
+    .interval(std::time::Duration::from_secs(1));
+let report = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()))
+    .session(session)
     .run()
     .await?;
 
@@ -59,6 +61,9 @@ println!("min/avg/max = {:?}/{:?}/{:?}", report.min(), report.mean(), report.max
 The public low-level surface is intentionally small:
 
 - `rup::Transport` trait — implement for custom protocols
+- `rup::run_with_transport()`, `rup::start_with_transport()` — run a session
+  over any `Transport` with a `rup::SessionConfig`
+- `rup::Target` — built-in transport plus its protocol-specific data, used by `Pinger`
 - `rup::UdpTransport`, `rup::TcpTransport`, `rup::IcmpTransport`,
   `rup::HttpTransport` (`http` feature)
 - `rup::HttpTarget`, `rup::HttpScheme`, `rup::HttpVersion`
@@ -127,7 +132,9 @@ To add a new protocol:
 1. Create a new file `src/transport/async_<proto>.rs`
 2. Implement `Transport` for your struct
 3. Add `pub mod async_<proto>;` in `transport/mod.rs`
-4. Register in `Pinger` (lib.rs) and `main.rs` for CLI support
+4. Add a `Target` variant with the data the transport needs, and its arm in
+   `spawn_ping_session` (`session.rs`)
+5. Map the CLI `Protocol` to the new `Target` in `app.rs`
 
 ## Key patterns
 

@@ -57,13 +57,15 @@ rup = { git = "https://github.com/svart/rup" }
 
 ```rust
 use std::time::Duration;
-use rup::{Pinger, Protocol, TrafficClass};
+use rup::{Pinger, SessionConfig, Target, TrafficClass};
 
 # async fn example() -> std::io::Result<()> {
-let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
+let session = SessionConfig::default()
     .count(5)
+    .interval(Duration::from_secs(1));
+let report = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()))
+    .session(session)
     .traffic_class(TrafficClass::new(184))
-    .interval(Duration::from_secs(1))
     .run()
     .await?;
 

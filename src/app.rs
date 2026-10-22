@@ -7,7 +7,10 @@ use tokio::runtime;
 use crate::cli::CliParams::{PingerParams, ServerParams};
 use crate::cli::{self, OutputFormat};
 use crate::output_template::{ReplyFormat, fmt_duration_ms_value};
-use rup::{HttpTarget, PacketSize, PingConfig, PingEvent, PingReport, PingResult, Protocol};
+use rup::{
+    HttpTarget, HttpVersion, PacketSize, PingEvent, PingReport, PingResult, Pinger, Protocol,
+    SessionConfig, Target,
+};
 use serde_json::json;
 
 #[derive(Clone, Debug)]
@@ -257,35 +260,54 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
         request_size: params.request_size,
     };
 
-    let mut config = PingConfig::new(target.address, params.protocol);
-    if params.protocol.http_version().is_some() {
-        let http_target = params
+    let remote = target.address;
+    let url = || {
+        params
             .remote_address
             .parse::<HttpTarget>()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        config = config.http_target(http_target);
-    }
-    config = config.interval(params.interval).timeout(params.wait_time);
-    if let Some(local_address) = params.local_address {
-        config = config.local_address(local_address);
-    }
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+    };
+    let ping_target = match params.protocol {
+        Protocol::Udp => Target::Udp(remote),
+        Protocol::Tcp => Target::Tcp(remote),
+        Protocol::Icmp => Target::Icmp(remote),
+        Protocol::Http1 => Target::Http {
+            version: HttpVersion::Http1,
+            remote,
+            url: url()?,
+        },
+        Protocol::Http2 => Target::Http {
+            version: HttpVersion::Http2,
+            remote,
+            url: url()?,
+        },
+    };
+
+    let mut session_config = SessionConfig::default()
+        .interval(params.interval)
+        .timeout(params.wait_time);
     if params.adaptive {
-        config = config.adaptive();
+        session_config = session_config.adaptive();
     }
     if let Some(size) = params.request_size {
-        config = config.request_size(size);
+        session_config = session_config.request_size(size);
     }
     if let Some(size) = params.response_size {
-        config = config.response_size(size);
+        session_config = session_config.response_size(size);
+    }
+    if let Some(count) = params.ping_number {
+        session_config = session_config.count(count);
+    }
+    if let Some(run_time) = params.run_time {
+        session_config = session_config.run_time(run_time);
+    }
+
+    let mut config = Pinger::new(ping_target).session(session_config);
+    if let Some(local_address) = params.local_address {
+        config = config.local(local_address);
     }
     if let Some(traffic_class) = params.tos {
         config = config.traffic_class(traffic_class);
-    }
-    if let Some(count) = params.ping_number {
-        config = config.count(count);
-    }
-    if let Some(run_time) = params.run_time {
-        config = config.run_time(run_time);
     }
 
     let started_at_ms = unix_timestamp_ms()?;
@@ -299,7 +321,7 @@ async fn run_client(params: cli::PingerParams) -> io::Result<()> {
             )
         }
     }
-    let mut session = rup::start_ping_session(config).await?;
+    let mut session = config.start().await?;
     let mut interrupted = false;
     let mut previous_reply_at = None;
     loop {

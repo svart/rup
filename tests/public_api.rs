@@ -1,26 +1,21 @@
 use std::time::Duration;
 
-use rup::{PacketSize, PingConfig, PingReport, Pinger, Protocol, TrafficClass};
+use rup::{PacketSize, PingReport, Pinger, SessionConfig, Target, TrafficClass};
 
 #[test]
 fn high_level_builders_compose_without_exposing_internal_state() {
     let remote = "127.0.0.1:5000".parse().unwrap();
     let packet_size = PacketSize::new(64).unwrap();
 
-    let _config = PingConfig::new(remote, Protocol::Udp)
+    let session = SessionConfig::default()
         .count(5)
         .interval(Duration::from_millis(250))
         .timeout(Duration::from_secs(2))
         .request_size(packet_size)
-        .response_size(packet_size)
-        .traffic_class(TrafficClass::new(184));
+        .response_size(packet_size);
 
-    let _pinger = Pinger::new(remote, Protocol::Udp)
-        .count(5)
-        .interval(Duration::from_millis(250))
-        .timeout(Duration::from_secs(2))
-        .request_size(packet_size)
-        .response_size(packet_size)
+    let _pinger = Pinger::new(Target::Udp(remote))
+        .session(session)
         .traffic_class(TrafficClass::new(184));
 }
 

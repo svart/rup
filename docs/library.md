@@ -13,14 +13,16 @@ Use `Pinger` for simple sessions:
 
 ```rust
 use std::time::Duration;
-use rup::{Pinger, Protocol, TrafficClass};
+use rup::{Pinger, SessionConfig, Target, TrafficClass};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let report = Pinger::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
+    let session = SessionConfig::default()
         .count(5)
+        .interval(Duration::from_secs(1));
+    let report = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()))
+        .session(session)
         .traffic_class(TrafficClass::new(184))
-        .interval(Duration::from_secs(1))
         .run()
         .await?;
 
@@ -35,7 +37,24 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Available builder methods:
+`Target` selects the built-in transport and carries only the data that this
+transport needs: `Udp(addr)`, `Tcp(addr)`, `Icmp(addr)` (port ignored), or
+`Http { version, remote, url }`.
+
+`Pinger` holds the transport settings. `SessionConfig` holds the settings that
+do not depend on the transport, and `Pinger::session()` attaches it. Without
+`session()`, `SessionConfig::default()` applies: an unbounded session with a 1 s
+interval and a 1 s timeout.
+
+`Pinger` methods:
+
+| Method | Effect |
+|--------|--------|
+| `session(SessionConfig)` | Set the request schedule, sizes, and timeout |
+| `traffic_class(TrafficClass)` | Set outgoing IP TOS / IPv6 traffic class byte |
+| `local(addr)` | Bind to a local socket address |
+
+`SessionConfig` methods:
 
 | Method | Effect |
 |--------|--------|
@@ -45,45 +64,22 @@ Available builder methods:
 | `timeout(duration)` | Set response timeout |
 | `request_size(PacketSize)` | Set request payload size |
 | `response_size(PacketSize)` | Ask UDP/TCP server for a response size |
-| `traffic_class(TrafficClass)` | Set outgoing IP TOS / IPv6 traffic class byte |
-| `local(addr)` | Bind to a local socket address |
 | `run_time(duration)` | Stop after a duration |
-| `http_target(HttpTarget)` | URL for `Protocol::Http1`/`Http2` [default: `http://<remote>/`] |
 
-## Structured Sessions
+## Live Sessions
 
-Use `PingConfig` when callers already have a resolved socket address, typed
-protocol, and duration values:
+`Pinger::run()` returns a quiet `PingReport`. Use `Pinger::start()` when
+callers need live results:
 
 ```rust
-use rup::{PingConfig, Protocol, TrafficClass, run_ping_session};
+use rup::{PingEvent, Pinger, SessionConfig, Target};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let config = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
-        .count(5)
-        .traffic_class(TrafficClass::new(184));
-
-    let report = run_ping_session(config).await?;
-    println!("received {} replies", report.received());
-
-    Ok(())
-}
-```
-
-`run_ping_session()` returns a quiet `PingReport`.
-
-Use `start_ping_session()` when callers need live results:
-
-```rust
-use rup::{PingConfig, PingEvent, Protocol, start_ping_session};
-
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let config = PingConfig::new("127.0.0.1:5000".parse().unwrap(), Protocol::Udp)
-        .count(5);
-
-    let mut session = start_ping_session(config).await?;
+    let mut session = Pinger::new(Target::Udp("127.0.0.1:5000".parse().unwrap()))
+        .session(SessionConfig::default().count(5))
+        .start()
+        .await?;
     while let Some(event) = session.next().await {
         match event {
             PingEvent::Reply(result) => println!(
@@ -110,7 +106,7 @@ already-sent requests to reply or time out. Continue consuming events until
 `next()` returns `None`, then call `report()`. Calling `report()` also requests
 a stop, so an unbounded session does not need a separate cancellation task.
 
-`PingConfig::traffic_class()` accepts the full TOS / traffic class byte. UDP
+`Pinger::traffic_class()` accepts the full TOS / traffic class byte. UDP
 servers reflect the received byte on echo responses when available from the
 operating system.
 
@@ -120,11 +116,11 @@ rup application echo when its first connection succeeds and otherwise switches
 to per-request connect probes. These outcomes arrive as ordinary
 `PingEvent::Reply` values with `size == 0` and `ttl == None`.
 
-For `Protocol::Http1` and `Protocol::Http2`, pass the resolved address of the
-URL host as `remote` and the URL as `http_target`:
+For HTTP, pass the resolved address of the URL host as `remote` and the parsed
+URL as `url`:
 
 ```rust,no_run
-use rup::{HttpTarget, Pinger, Protocol, ensure_port};
+use rup::{HttpTarget, HttpVersion, Pinger, Protocol, SessionConfig, Target, ensure_port};
 
 # async fn example() -> std::io::Result<()> {
 let url = "https://example.com/status";
@@ -133,11 +129,14 @@ let remote = tokio::net::lookup_host(ensure_port(url, Protocol::Http2)?)
     .await?
     .next()
     .unwrap();
-let report = Pinger::new(remote, Protocol::Http2)
-    .http_target(target)
-    .count(5)
-    .run()
-    .await?;
+let report = Pinger::new(Target::Http {
+    version: HttpVersion::Http2,
+    remote,
+    url: target,
+})
+.session(SessionConfig::default().count(5))
+.run()
+.await?;
 # Ok(())
 # }
 ```
@@ -168,6 +167,9 @@ The public API intentionally exposes session-level operations and the minimum
 needed to implement a custom transport:
 
 - `Transport`
+- `run_with_transport()` and `start_with_transport()`: like `Pinger::run()` and
+  `Pinger::start()`, but over a caller-provided `Transport` with a
+  `SessionConfig` (schedule, sizes, reply timeout)
 - `UdpTransport`, `TcpTransport`, `IcmpTransport`, and `HttpTransport` with the
   `http` feature
 - `HttpTarget`, `HttpScheme`, `HttpVersion`

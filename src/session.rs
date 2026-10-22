@@ -649,25 +649,15 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Instant;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, mpsc};
 
+    /// Replies to the scripted ids, in order, as each one is sent.
     #[derive(Clone)]
     struct ScriptedTransport {
         replies: Arc<Mutex<VecDeque<u64>>>,
-        pending: Arc<Mutex<VecDeque<u64>>>,
-    }
-
-    #[derive(Clone)]
-    struct OrderedScriptedTransport {
-        replies: Arc<Mutex<VecDeque<u64>>>,
-        pending: Arc<Mutex<VecDeque<u64>>>,
-    }
-
-    #[derive(Clone)]
-    struct DelayedScriptedTransport {
-        replies: Arc<Mutex<VecDeque<u64>>>,
-        pending: Arc<Mutex<VecDeque<u64>>>,
-        delay: Duration,
+        reply_delay: Duration,
+        delivered_tx: mpsc::UnboundedSender<u64>,
+        delivered_rx: Arc<Mutex<mpsc::UnboundedReceiver<u64>>>,
     }
 
     #[derive(Clone)]
@@ -678,29 +668,18 @@ mod tests {
 
     impl ScriptedTransport {
         fn new(responses: impl IntoIterator<Item = u64>) -> Self {
+            let (delivered_tx, delivered_rx) = mpsc::unbounded_channel();
             Self {
                 replies: Arc::new(Mutex::new(responses.into_iter().collect())),
-                pending: Arc::new(Mutex::new(VecDeque::new())),
+                reply_delay: Duration::ZERO,
+                delivered_tx,
+                delivered_rx: Arc::new(Mutex::new(delivered_rx)),
             }
         }
-    }
 
-    impl OrderedScriptedTransport {
-        fn new(responses: impl IntoIterator<Item = u64>) -> Self {
-            Self {
-                replies: Arc::new(Mutex::new(responses.into_iter().collect())),
-                pending: Arc::new(Mutex::new(VecDeque::new())),
-            }
-        }
-    }
-
-    impl DelayedScriptedTransport {
-        fn new(responses: impl IntoIterator<Item = u64>, delay: Duration) -> Self {
-            Self {
-                replies: Arc::new(Mutex::new(responses.into_iter().collect())),
-                pending: Arc::new(Mutex::new(VecDeque::new())),
-                delay,
-            }
+        fn with_reply_delay(mut self, delay: Duration) -> Self {
+            self.reply_delay = delay;
+            self
         }
     }
 
@@ -709,84 +688,30 @@ mod tests {
             let mut replies = self.replies.lock().await;
             if replies.front() == Some(&req.id) {
                 replies.pop_front();
-                self.pending.lock().await.push_back(req.id);
-            }
-            Ok(Instant::now())
-        }
-
-        async fn recv(&self) -> io::Result<Response> {
-            loop {
-                if let Some(id) = self.pending.lock().await.pop_front() {
-                    return Ok(Response {
-                        id,
-                        timestamp: Instant::now(),
-                        size: 0,
-                        ttl: None,
-                    });
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        }
-    }
-
-    impl Transport for OrderedScriptedTransport {
-        async fn send(&self, req: &Request) -> io::Result<Instant> {
-            let mut replies = self.replies.lock().await;
-            if replies.front() == Some(&req.id) {
-                replies.pop_front();
-                let pending = self.pending.clone();
-                let id = req.id;
+                let (id, delay, delivered) = (req.id, self.reply_delay, self.delivered_tx.clone());
+                // Deliver after send returns so the reply follows its Open entry.
                 tokio::spawn(async move {
-                    tokio::task::yield_now().await;
-                    pending.lock().await.push_back(id);
+                    if delay.is_zero() {
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let _ = delivered.send(id);
                 });
             }
             Ok(Instant::now())
         }
 
         async fn recv(&self) -> io::Result<Response> {
-            loop {
-                if let Some(id) = self.pending.lock().await.pop_front() {
-                    return Ok(Response {
-                        id,
-                        timestamp: Instant::now(),
-                        size: 0,
-                        ttl: None,
-                    });
-                }
-                tokio::task::yield_now().await;
-            }
-        }
-    }
-
-    impl Transport for DelayedScriptedTransport {
-        async fn send(&self, req: &Request) -> io::Result<Instant> {
-            let mut replies = self.replies.lock().await;
-            if replies.front() == Some(&req.id) {
-                replies.pop_front();
-                let pending = self.pending.clone();
-                let delay = self.delay;
-                let id = req.id;
-                tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    pending.lock().await.push_back(id);
-                });
-            }
-            Ok(Instant::now())
-        }
-
-        async fn recv(&self) -> io::Result<Response> {
-            loop {
-                if let Some(id) = self.pending.lock().await.pop_front() {
-                    return Ok(Response {
-                        id,
-                        timestamp: Instant::now(),
-                        size: 0,
-                        ttl: None,
-                    });
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            let id = self.delivered_rx.lock().await.recv().await;
+            // The sender half lives in `self`, so the channel never closes.
+            let id = id.expect("scripted transport channel closed");
+            Ok(Response {
+                id,
+                timestamp: Instant::now(),
+                size: 0,
+                ttl: None,
+            })
         }
     }
 
@@ -811,105 +736,41 @@ mod tests {
     }
 
     #[test]
-    fn has_port_detects_v4_with_port() {
-        assert!(has_port("127.0.0.1:5000"));
+    fn has_port_requires_a_numeric_port_after_the_host() {
+        for (address, expected) in [
+            ("127.0.0.1:5000", true),
+            ("127.0.0.1", false),
+            ("[::1]:5000", true),
+            ("[::1]", false),
+            ("[2001:db8::1]:8080", true),
+            ("[2001:db8::1]", false),
+            ("localhost:8080", true),
+            ("localhost", false),
+            ("127.0.0.1:", false),
+            ("127.0.0.1:abc", false),
+            ("", false),
+            (":5000", true),
+        ] {
+            assert_eq!(has_port(address), expected, "{address:?}");
+        }
     }
 
     #[test]
-    fn has_port_detects_v4_without_port() {
-        assert!(!has_port("127.0.0.1"));
-    }
-
-    #[test]
-    fn has_port_detects_v6_with_port() {
-        assert!(has_port("[::1]:5000"));
-    }
-
-    #[test]
-    fn has_port_detects_v6_without_port() {
-        assert!(!has_port("[::1]"));
-    }
-
-    #[test]
-    fn has_port_detects_hostname_with_port() {
-        assert!(has_port("localhost:8080"));
-    }
-
-    #[test]
-    fn has_port_detects_hostname_without_port() {
-        assert!(!has_port("localhost"));
-    }
-
-    #[test]
-    fn has_port_empty_after_colon() {
-        assert!(!has_port("127.0.0.1:"));
-    }
-
-    #[test]
-    fn has_port_non_numeric_after_colon() {
-        assert!(!has_port("127.0.0.1:abc"));
-    }
-
-    #[test]
-    fn has_port_multiple_colons_ipv6() {
-        assert!(has_port("[2001:db8::1]:8080"));
-    }
-
-    #[test]
-    fn has_port_multiple_colons_no_port() {
-        assert!(!has_port("[2001:db8::1]"));
-    }
-
-    #[test]
-    fn has_port_empty_string() {
-        assert!(!has_port(""));
-    }
-
-    #[test]
-    fn has_port_just_port_number() {
-        assert!(has_port(":5000"));
-    }
-
-    #[test]
-    fn ensure_port_keeps_existing_v4() {
-        assert_eq!(
-            ensure_port("10.0.0.1:9999", Protocol::Udp).unwrap(),
-            "10.0.0.1:9999"
-        );
-    }
-
-    #[test]
-    fn ensure_port_keeps_existing_v6() {
-        assert_eq!(
-            ensure_port("[::1]:443", Protocol::Tcp).unwrap(),
-            "[::1]:443"
-        );
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_v4() {
-        assert_eq!(
-            ensure_port("192.168.1.1", Protocol::Icmp).unwrap(),
-            "192.168.1.1:0"
-        );
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_v6() {
-        assert_eq!(ensure_port("[::1]", Protocol::Icmp).unwrap(), "[::1]:0");
-    }
-
-    #[test]
-    fn ensure_port_brackets_unbracketed_icmp_v6() {
-        assert_eq!(ensure_port("::1", Protocol::Icmp).unwrap(), "[::1]:0");
-    }
-
-    #[test]
-    fn ensure_port_adds_zero_for_icmp_hostname() {
-        assert_eq!(
-            ensure_port("localhost", Protocol::Icmp).unwrap(),
-            "localhost:0"
-        );
+    fn ensure_port_keeps_ports_and_adds_zero_for_icmp() {
+        for (address, protocol, expected) in [
+            ("10.0.0.1:9999", Protocol::Udp, "10.0.0.1:9999"),
+            ("[::1]:443", Protocol::Tcp, "[::1]:443"),
+            ("192.168.1.1", Protocol::Icmp, "192.168.1.1:0"),
+            ("[::1]", Protocol::Icmp, "[::1]:0"),
+            ("::1", Protocol::Icmp, "[::1]:0"),
+            ("localhost", Protocol::Icmp, "localhost:0"),
+        ] {
+            assert_eq!(
+                ensure_port(address, protocol).unwrap(),
+                expected,
+                "{address:?}"
+            );
+        }
     }
 
     #[test]
@@ -1172,7 +1033,7 @@ mod tests {
         let report = tokio::time::timeout(
             Duration::from_secs(2),
             run_with_transport(
-                OrderedScriptedTransport::new(0..count),
+                ScriptedTransport::new(0..count),
                 SessionConfig::default()
                     .adaptive()
                     .timeout(Duration::from_millis(100))
@@ -1208,7 +1069,7 @@ mod tests {
     #[tokio::test]
     async fn run_ping_with_transport_waits_for_delayed_final_response() {
         let report = run_with_transport(
-            DelayedScriptedTransport::new([0], Duration::from_millis(10)),
+            ScriptedTransport::new([0]).with_reply_delay(Duration::from_millis(10)),
             SessionConfig::default()
                 .interval(Duration::from_millis(1))
                 .timeout(Duration::from_millis(100))

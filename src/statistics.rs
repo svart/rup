@@ -242,178 +242,64 @@ async fn statista_with_collector(
 }
 
 #[cfg(test)]
-struct RttSequence {
-    rtts: Vec<Duration>,
-    sent: u64,
-    received: u64,
-}
-
-#[cfg(test)]
-impl Default for RttSequence {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-impl RttSequence {
-    pub fn new() -> Self {
-        RttSequence {
-            rtts: Vec::with_capacity(1024),
-            sent: 0,
-            received: 0,
-        }
-    }
-
-    pub fn record(&mut self, rtt: Duration) {
-        self.rtts.push(rtt);
-        self.received += 1;
-    }
-
-    pub fn set_total_sent(&mut self, n: u64) {
-        self.sent = n;
-    }
-
-    pub fn mean(&self) -> Duration {
-        mean(&self.rtts).unwrap_or_default()
-    }
-
-    pub fn std_deviation(&self) -> Duration {
-        std_deviation(&self.rtts).unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pinger::Entry;
     use std::time::Instant;
     use tokio::sync::mpsc;
 
-    #[test]
-    fn rtt_sequence_mean() {
-        let mut seq = RttSequence::new();
-        for i in 0..4 {
-            seq.record(Duration::from_micros(100 * (i as u64 + 1)));
-        }
-        assert_eq!(seq.mean(), Duration::from_micros(250));
+    fn micros(values: &[u64]) -> Vec<Duration> {
+        values.iter().copied().map(Duration::from_micros).collect()
     }
 
     #[test]
-    fn rtt_sequence_mean_single_entry() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(42));
-        assert_eq!(seq.mean(), Duration::from_micros(42));
+    fn aggregates_are_none_without_samples() {
+        assert_eq!(mean(&[]), None);
+        assert_eq!(median(&[]), None);
+        assert_eq!(std_deviation(&[]), None);
     }
 
     #[test]
-    fn rtt_sequence_mean_large_values() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_secs(10));
-        seq.record(Duration::from_secs(20));
-        assert_eq!(seq.mean(), Duration::from_secs(15));
+    fn mean_averages_samples() {
+        assert_eq!(
+            mean(&micros(&[100, 200, 300, 400])),
+            Some(Duration::from_micros(250))
+        );
+        assert_eq!(
+            mean(&[Duration::from_secs(10), Duration::from_secs(20)]),
+            Some(Duration::from_secs(15))
+        );
     }
 
     #[test]
-    fn rtt_sequence_median_odd() {
-        let mut seq = RttSequence::new();
-        for i in 0..5 {
-            seq.record(Duration::from_micros((i as u64 + 1) * 10));
-        }
-        seq.set_total_sent(5);
-        seq.rtts.sort();
-        assert_eq!(seq.rtts[seq.rtts.len() / 2], Duration::from_micros(30));
+    fn median_sorts_and_takes_upper_middle_for_even_counts() {
+        assert_eq!(
+            median(&micros(&[50, 10, 40, 20, 30])),
+            Some(Duration::from_micros(30))
+        );
+        assert_eq!(
+            median(&micros(&[40, 10, 30, 20])),
+            Some(Duration::from_micros(30))
+        );
     }
 
     #[test]
-    fn rtt_sequence_median_even() {
-        let mut seq = RttSequence::new();
-        for i in 0..4 {
-            seq.record(Duration::from_micros((i as u64 + 1) * 10));
-        }
-        seq.set_total_sent(4);
-        seq.rtts.sort();
-        assert_eq!(seq.rtts[seq.rtts.len() / 2], Duration::from_micros(30));
+    fn std_deviation_is_population_deviation() {
+        assert_eq!(
+            std_deviation(&micros(&[100, 100, 100])),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            std_deviation(&micros(&[0, 100])),
+            Some(Duration::from_micros(50))
+        );
     }
 
     #[test]
-    fn rtt_sequence_single_entry() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(100));
-        seq.set_total_sent(1);
-        seq.rtts.sort();
-        assert_eq!(seq.rtts.len(), 1);
-        assert_eq!(seq.rtts[0], Duration::from_micros(100));
-        assert_eq!(seq.sent, 1);
-        assert_eq!(seq.received, 1);
-    }
-
-    #[test]
-    fn rtt_sequence_large_dataset() {
-        let mut seq = RttSequence::new();
-        for i in 0..1000 {
-            seq.record(Duration::from_nanos(i));
-        }
-        seq.set_total_sent(1000);
-        assert_eq!(seq.received, 1000);
-        assert!(!seq.rtts.is_empty());
-    }
-
-    #[test]
-    fn rtt_sequence_std_dev_zero() {
-        let mut seq = RttSequence::new();
-        for _ in 0..3 {
-            seq.record(Duration::from_micros(100));
-        }
-        assert_eq!(seq.std_deviation(), Duration::from_nanos(0));
-    }
-
-    #[test]
-    fn rtt_sequence_std_dev_known() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(0));
-        seq.record(Duration::from_micros(100));
-        let std_dev = seq.std_deviation();
-        assert!(std_dev.as_micros() > 0);
-    }
-
-    #[test]
-    fn rtt_sequence_exact_sent_tracking() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(50));
-        seq.set_total_sent(10);
-        assert_eq!(seq.sent, 10);
-        assert_eq!(seq.received, 1);
-    }
-
-    #[test]
-    fn rtt_sequence_loss_no_sent() {
-        let mut seq = RttSequence::new();
-        seq.set_total_sent(0);
-        let loss_pct = if seq.sent > 0 {
-            (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0
-        } else {
-            0.0
-        };
-        assert_eq!(loss_pct, 0.0);
-    }
-
-    #[test]
-    fn rtt_sequence_loss_partial() {
-        let mut seq = RttSequence::new();
-        seq.record(Duration::from_micros(1));
-        seq.record(Duration::from_micros(2));
-        seq.set_total_sent(4);
-        let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
-        assert!((loss_pct - 50.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn rtt_sequence_full_loss() {
-        let mut seq = RttSequence::new();
-        seq.set_total_sent(5);
-        let loss_pct = (seq.sent - seq.received) as f64 / seq.sent as f64 * 100.0;
-        assert!((loss_pct - 100.0).abs() < f64::EPSILON);
+    fn loss_pct_handles_no_partial_and_full_loss() {
+        assert_eq!(loss_pct(0, 0), 0.0);
+        assert_eq!(loss_pct(4, 2), 50.0);
+        assert_eq!(loss_pct(5, 0), 100.0);
     }
 
     #[tokio::test]

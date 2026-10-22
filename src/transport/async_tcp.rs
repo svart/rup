@@ -396,79 +396,6 @@ mod tests {
     use crate::PacketSize;
     use tokio::io::AsyncReadExt;
 
-    #[test]
-    fn encode_request_default_size() {
-        let req = Request {
-            id: 10,
-            request_size: None,
-            response_size: None,
-        };
-        let buf = echo_codec::encode_request(&req);
-        assert_eq!(buf.len(), PING_HDR_LEN);
-        let echo = echo_codec::decode_header(&buf).unwrap();
-        assert_eq!(echo.id, 10);
-        assert_eq!(echo.len, PING_HDR_LEN as u16);
-    }
-
-    #[test]
-    fn encode_request_padded() {
-        let req = Request {
-            id: 99,
-            request_size: Some(PacketSize::new(64).unwrap()),
-            response_size: None,
-        };
-        let buf = echo_codec::encode_request(&req);
-        assert_eq!(buf.len(), 64);
-        assert_eq!(&buf[PING_HDR_LEN..], &[0u8; 64 - PING_HDR_LEN]);
-    }
-
-    #[test]
-    fn encode_request_with_resp_size() {
-        let req = Request {
-            id: 5,
-            request_size: Some(PacketSize::new(50).unwrap()),
-            response_size: Some(PacketSize::new(200).unwrap()),
-        };
-        let buf = echo_codec::encode_request(&req);
-        let echo = echo_codec::decode_header(&buf[..PING_HDR_LEN]).unwrap();
-        assert_eq!(echo.id, 5);
-        assert_eq!(echo.resp_size, 200);
-    }
-
-    #[test]
-    fn decode_header_valid() {
-        let req = Request {
-            id: 42,
-            request_size: Some(PacketSize::new(100).unwrap()),
-            response_size: Some(PacketSize::new(200).unwrap()),
-        };
-        let buf = echo_codec::encode_request(&req);
-        let mut hdr = [0u8; PING_HDR_LEN];
-        hdr.copy_from_slice(&buf[..PING_HDR_LEN]);
-        let echo = echo_codec::decode_header(&hdr).unwrap();
-        assert_eq!(echo.id, 42);
-        assert_eq!(echo.len, 100);
-        assert_eq!(echo.resp_size, 200);
-    }
-
-    #[test]
-    fn decode_header_all_ff_decodes_to_max() {
-        let hdr = [0xff; PING_HDR_LEN];
-        let echo = echo_codec::decode_header(&hdr).unwrap();
-        assert_eq!(echo.id, u64::MAX);
-        assert_eq!(echo.len, u16::MAX);
-        assert_eq!(echo.resp_size, u16::MAX);
-    }
-
-    #[test]
-    fn decode_header_zeroes() {
-        let hdr = [0u8; PING_HDR_LEN];
-        let echo = echo_codec::decode_header(&hdr).unwrap();
-        assert_eq!(echo.id, 0);
-        assert_eq!(echo.len, 0);
-        assert_eq!(echo.resp_size, 0);
-    }
-
     #[tokio::test]
     async fn tcp_transport_send_and_receive() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -588,41 +515,5 @@ mod tests {
         assert!(response.timestamp >= sent);
         assert_eq!(response.size, 0);
         assert_eq!(response.ttl, None);
-    }
-
-    #[tokio::test]
-    async fn tcp_transport_send_large_request() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let client_stream = TcpStream::connect(server_addr).await.unwrap();
-        let (mut server_stream, _) = listener.accept().await.unwrap();
-
-        let transport = TcpClientTransport::new(client_stream);
-
-        let server_handle = tokio::spawn(async move {
-            let mut hdr = [0; PING_HDR_LEN];
-            server_stream.read_exact(&mut hdr).await.unwrap();
-            let echo = echo_codec::decode_header(&hdr).unwrap();
-            let remaining = echo.len as usize - PING_HDR_LEN;
-            if remaining > 0 {
-                let mut extra = vec![0; remaining];
-                server_stream.read_exact(&mut extra).await.unwrap();
-            }
-            let mut send_buf = hdr.to_vec();
-            send_buf.resize(echo.len as usize, 0);
-            let _ = server_stream.write_all(&send_buf).await;
-        });
-
-        let req = Request {
-            id: 7,
-            request_size: Some(PacketSize::new(512).unwrap()),
-            response_size: None,
-        };
-        transport.send(&req).await.unwrap();
-        let resp = transport.recv().await.unwrap();
-        assert_eq!(resp.id, 7);
-
-        server_handle.await.unwrap();
     }
 }

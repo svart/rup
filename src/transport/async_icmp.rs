@@ -476,16 +476,11 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_icmp_too_short() {
-        let result = try_parse_icmp_response(&[0u8; 4], IpVersion::V4, None).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn try_parse_icmp_just_below_minimum() {
-        let buf = vec![0u8; DATA_OFFSET + PING_HDR_LEN - 1];
-        let result = try_parse_icmp_response(&buf, IpVersion::V4, None).unwrap();
-        assert!(result.is_none());
+    fn try_parse_icmp_ignores_packets_shorter_than_echo_header() {
+        for len in [4, DATA_OFFSET + PING_HDR_LEN - 1] {
+            let result = try_parse_icmp_response(&vec![0u8; len], IpVersion::V4, None).unwrap();
+            assert!(result.is_none(), "len={len}");
+        }
     }
 
     #[test]
@@ -516,21 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn csum16_slice_even() {
-        let data = [0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01];
-        let csum = csum16_slice(&data);
-        let got = !csum;
-        let expected: u16 = 0x0800u16
-            .wrapping_add(0x0000u16)
-            .wrapping_add(0x1234u16)
-            .wrapping_add(0x0001u16);
-        assert_eq!(got, expected);
+    fn csum16_slice_matches_rfc1071_example() {
+        // RFC 1071, section 3: the one's complement sum of these bytes is 0xddf2.
+        let data = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
+        assert_eq!(csum16_slice(&data), !0xddf2);
     }
 
     #[test]
-    fn csum16_odd_length() {
-        let data = [0x08, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00];
-        let _csum = csum16_slice(&data);
+    fn csum16_slice_pads_odd_trailing_byte_as_high_byte() {
+        assert_eq!(csum16_slice(&[0x12, 0x34, 0x56]), !(0x1234 + 0x5600));
     }
 
     #[test]
@@ -579,48 +568,25 @@ mod tests {
             }
         };
 
-        let req = Request {
-            id: 100,
-            request_size: None,
-            response_size: None,
-        };
+        for (id, request_size) in [(100, None), (200, Some(PacketSize::new(64).unwrap()))] {
+            let req = Request {
+                id,
+                request_size,
+                response_size: None,
+            };
 
-        transport.send(&req).await.unwrap();
+            transport.send(&req).await.unwrap();
 
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv())
-            .await
-            .unwrap()
-            .unwrap();
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
-        assert_eq!(resp.id, 100);
-    }
-
-    #[tokio::test]
-    async fn icmp_transport_ping_loopback_padded() {
-        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let remote: SocketAddr = "127.0.0.1:0".parse().unwrap();
-
-        let transport = match IcmpClientTransport::new(local, remote).await {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("ICMP socket not available, skipping test: {e}");
-                return;
-            }
-        };
-
-        let req = Request {
-            id: 200,
-            request_size: Some(PacketSize::new(64).unwrap()),
-            response_size: None,
-        };
-
-        transport.send(&req).await.unwrap();
-
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv())
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(resp.id, 200);
+            assert_eq!(resp.id, id);
+            assert_eq!(
+                resp.size,
+                request_size.map_or(PING_HDR_LEN, |size| size.get() as usize)
+            );
+        }
     }
 }

@@ -276,14 +276,28 @@ pub(crate) fn get_cli_params() -> CliParams {
 mod tests {
     use super::*;
 
-    fn matches(args: impl IntoIterator<Item = &'static str>) -> clap::ArgMatches {
-        cli().try_get_matches_from(args).unwrap()
+    fn client(args: &[&str]) -> PingerParams {
+        match get_cli_params_from(std::iter::once("rup").chain(args.iter().copied())) {
+            Ok(CliParams::PingerParams(params)) => params,
+            Ok(CliParams::ServerParams(_)) => panic!("expected pinger params for {args:?}"),
+            Err(error) => panic!("{args:?} failed to parse: {error}"),
+        }
     }
 
-    fn try_matches(
-        args: impl IntoIterator<Item = &'static str>,
-    ) -> Result<clap::ArgMatches, clap::Error> {
-        cli().try_get_matches_from(args)
+    fn server(args: &[&str]) -> ServerParams {
+        match get_cli_params_from(std::iter::once("rup").chain(args.iter().copied())) {
+            Ok(CliParams::ServerParams(params)) => params,
+            Ok(CliParams::PingerParams(_)) => panic!("expected server params for {args:?}"),
+            Err(error) => panic!("{args:?} failed to parse: {error}"),
+        }
+    }
+
+    fn rejects(args: &[&str]) -> bool {
+        get_cli_params_from(std::iter::once("rup").chain(args.iter().copied())).is_err()
+    }
+
+    fn size(value: u16) -> Option<PacketSize> {
+        Some(PacketSize::new(value).unwrap())
     }
 
     #[test]
@@ -292,26 +306,29 @@ mod tests {
     }
 
     #[test]
-    fn cli_client_defaults() {
-        let matches = matches(["rup", "127.0.0.1:5000"]);
-        assert_eq!(matches.subcommand_name(), None);
-        assert_eq!(
-            matches.get_one::<String>("remote-address").unwrap(),
-            "127.0.0.1:5000"
-        );
-        assert!(matches.get_one::<SocketAddr>("local-address").is_none());
-        assert_eq!(*matches.get_one::<u64>("interval").unwrap(), 1000);
-        assert!(!*matches.get_one::<bool>("adaptive-interval").unwrap());
-        assert_eq!(*matches.get_one::<u64>("wait-time").unwrap(), 1000);
-        assert!(matches.get_one::<u16>("req-size").is_none());
-        assert!(matches.get_one::<u8>("tos").is_none());
-        assert!(matches.get_one::<u64>("ping-number").is_none());
+    fn client_defaults() {
+        let params = client(&["8.8.8.8"]);
+
+        assert_eq!(params.remote_address, "8.8.8.8");
+        assert_eq!(params.protocol, Protocol::Icmp);
+        assert_eq!(params.local_address, None);
+        assert_eq!(params.interval, Duration::from_secs(1));
+        assert!(!params.adaptive);
+        assert_eq!(params.wait_time, Duration::from_secs(1));
+        assert_eq!(params.request_size, None);
+        assert_eq!(params.response_size, None);
+        assert_eq!(params.tos, None);
+        assert_eq!(params.ping_number, None);
+        assert_eq!(params.run_time, None);
+        assert_eq!(params.output, OutputFormat::Human);
+        assert!(params.format.is_none());
     }
 
     #[test]
-    fn cli_client_all_options() {
-        let matches = matches([
-            "rup",
+    fn client_all_options() {
+        let params = client(&[
+            "-p",
+            "udp",
             "10.0.0.1:8080",
             "--local-address",
             "0.0.0.0:5000",
@@ -330,279 +347,112 @@ mod tests {
             "-t",
             "30",
         ]);
+
+        assert_eq!(params.remote_address, "10.0.0.1:8080");
+        assert_eq!(params.protocol, Protocol::Udp);
         assert_eq!(
-            matches.get_one::<String>("remote-address").unwrap(),
-            "10.0.0.1:8080"
+            params.local_address,
+            Some(SocketAddr::from(([0, 0, 0, 0], 5000)))
         );
-        assert_eq!(*matches.get_one::<u64>("interval").unwrap(), 500);
-        assert_eq!(*matches.get_one::<u64>("wait-time").unwrap(), 2000);
-        assert_eq!(*matches.get_one::<u16>("req-size").unwrap(), 64);
-        assert_eq!(*matches.get_one::<u16>("resp-size").unwrap(), 128);
-        assert_eq!(*matches.get_one::<u8>("tos").unwrap(), 184);
-        assert_eq!(*matches.get_one::<u64>("ping-number").unwrap(), 10);
-        assert_eq!(*matches.get_one::<u64>("run-time").unwrap(), 30);
+        assert_eq!(params.interval, Duration::from_millis(500));
+        assert_eq!(params.wait_time, Duration::from_millis(2000));
+        assert_eq!(params.request_size, size(64));
+        assert_eq!(params.response_size, size(128));
+        assert_eq!(params.tos, Some(TrafficClass::new(184)));
+        assert_eq!(params.ping_number, Some(10));
+        assert_eq!(params.run_time, Some(Duration::from_secs(30)));
     }
 
     #[test]
-    fn cli_client_accepts_jsonl_output() {
-        let params = get_cli_params_from(["rup", "--output", "jsonl", "8.8.8.8"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.output, OutputFormat::Jsonl);
-            }
-            _ => panic!("expected pinger params"),
+    fn client_protocol_flag() {
+        for (flag, remote, protocol) in [
+            ("udp", "127.0.0.1:5000", Protocol::Udp),
+            ("tcp", "127.0.0.1:5000", Protocol::Tcp),
+            ("icmp", "8.8.8.8", Protocol::Icmp),
+            ("http", "https://example.com", Protocol::Http1),
+            ("http2", "https://example.com", Protocol::Http2),
+        ] {
+            let params = client(&["-p", flag, remote]);
+            assert_eq!(params.protocol, protocol, "-p {flag}");
+            assert_eq!(params.remote_address, remote);
         }
-    }
-
-    #[test]
-    fn cli_client_accepts_custom_reply_format() {
-        let params =
-            get_cli_params_from(["rup", "8.8.8.8", "--format", "{ip}: {seq} => {rtt}"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert!(params.format.is_some());
-            }
-            _ => panic!("expected pinger params"),
-        }
-    }
-
-    #[test]
-    fn cli_client_format_conflicts_with_jsonl_output() {
-        assert!(
-            get_cli_params_from(["rup", "8.8.8.8", "--output", "jsonl", "--format", "{seq}",])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn cli_client_format_can_be_used_with_explicit_human_output() {
-        assert!(
-            get_cli_params_from(["rup", "8.8.8.8", "--output", "human", "--format", "{seq}",])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn cli_client_rejects_invalid_custom_reply_format() {
-        assert!(get_cli_params_from(["rup", "8.8.8.8", "--format", "{rtt_ms:.7}"]).is_err());
-    }
-
-    #[test]
-    fn cli_client_output_defaults_to_human() {
-        let params = get_cli_params_from(["rup", "8.8.8.8"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.output, OutputFormat::Human);
-            }
-            _ => panic!("expected pinger params"),
-        }
-    }
-
-    #[test]
-    fn cli_server_rejects_output_format() {
-        assert!(
-            get_cli_params_from(["rup", "--output", "jsonl", "server", "127.0.0.1:5000",]).is_err()
-        );
-    }
-
-    #[test]
-    fn cli_server_rejects_custom_reply_format() {
-        assert!(
-            get_cli_params_from(["rup", "--format", "{seq}", "server", "127.0.0.1:5000",]).is_err()
-        );
-    }
-
-    #[test]
-    fn cli_client_adaptive_mode() {
-        let matches = matches(["rup", "127.0.0.1:5000", "-A"]);
-        assert!(*matches.get_one::<bool>("adaptive-interval").unwrap());
-    }
-
-    #[test]
-    fn cli_client_interval_conflicts_with_adaptive() {
-        assert!(try_matches(["rup", "127.0.0.1:5000", "-i", "500", "-A"]).is_err());
-    }
-
-    #[test]
-    fn cli_client_req_size_minimum() {
-        assert!(try_matches(["rup", "127.0.0.1:5000", "--request-size", "11"]).is_err());
-    }
-
-    #[test]
-    fn cli_client_req_size_valid() {
-        let matches = matches(["rup", "127.0.0.1:5000", "--request-size", "12"]);
-        assert_eq!(*matches.get_one::<u16>("req-size").unwrap(), 12);
-    }
-
-    #[test]
-    fn cli_client_tos_valid() {
-        let matches = matches(["rup", "127.0.0.1:5000", "--tos", "255"]);
-        assert_eq!(*matches.get_one::<u8>("tos").unwrap(), 255);
-    }
-
-    #[test]
-    fn cli_client_tos_invalid() {
-        assert!(try_matches(["rup", "127.0.0.1:5000", "--tos", "256"]).is_err());
-    }
-
-    #[test]
-    fn cli_server_basic() {
-        let matches = matches(["rup", "server", "0.0.0.0:5000"]);
-        assert_eq!(matches.subcommand_name(), Some("server"));
-        let (_, sub) = matches.subcommand().unwrap();
         assert_eq!(
-            *sub.get_one::<SocketAddr>("local-address").unwrap(),
-            SocketAddr::from(([0, 0, 0, 0], 5000))
+            client(&["--protocol=http1", "https://example.com"]).protocol,
+            Protocol::Http1
         );
+        assert!(rejects(&["-p", "invalid", "127.0.0.1:5000"]));
     }
 
     #[test]
-    fn cli_server_rejects_client_options() {
-        assert!(get_cli_params_from(["rup", "-i", "300", "server", "0.0.0.0:5000"]).is_err());
+    fn client_adaptive_mode_conflicts_with_interval() {
+        assert!(client(&["127.0.0.1:5000", "-A"]).adaptive);
+        assert!(rejects(&["127.0.0.1:5000", "-i", "500", "-A"]));
     }
 
     #[test]
-    fn cli_protocol_flag_udp() {
-        let matches = matches(["rup", "-p", "udp", "127.0.0.1:5000"]);
+    fn client_packet_size_must_cover_echo_header() {
         assert_eq!(
-            *matches.get_one::<Protocol>("protocol").unwrap(),
-            Protocol::Udp
+            client(&["127.0.0.1:5000", "--request-size", "12"]).request_size,
+            size(12)
         );
+        assert!(rejects(&["127.0.0.1:5000", "--request-size", "11"]));
+        assert!(rejects(&["127.0.0.1:5000", "--response-size", "11"]));
     }
 
     #[test]
-    fn cli_protocol_flag_tcp() {
-        let matches = matches(["rup", "-p", "tcp", "127.0.0.1:5000"]);
+    fn client_tos_must_fit_in_a_byte() {
         assert_eq!(
-            *matches.get_one::<Protocol>("protocol").unwrap(),
+            client(&["127.0.0.1:5000", "--tos", "255"]).tos,
+            Some(TrafficClass::new(255))
+        );
+        assert!(rejects(&["127.0.0.1:5000", "--tos", "256"]));
+    }
+
+    #[test]
+    fn client_requires_remote_address() {
+        assert!(rejects(&[]));
+        assert!(rejects(&["-i", "300"]));
+    }
+
+    #[test]
+    fn client_output_and_reply_format() {
+        assert_eq!(
+            client(&["--output", "jsonl", "8.8.8.8"]).output,
+            OutputFormat::Jsonl
+        );
+        assert!(
+            client(&["8.8.8.8", "--format", "{ip}: {seq} => {rtt}"])
+                .format
+                .is_some()
+        );
+        assert!(
+            client(&["8.8.8.8", "--output", "human", "--format", "{seq}"])
+                .format
+                .is_some()
+        );
+        assert!(rejects(&[
+            "8.8.8.8", "--output", "jsonl", "--format", "{seq}"
+        ]));
+        assert!(rejects(&["8.8.8.8", "--format", "{rtt_ms:.7}"]));
+    }
+
+    #[test]
+    fn server_parses_local_address_and_protocol() {
+        let params = server(&["server", "0.0.0.0:5000"]);
+        assert_eq!(params.local_address, SocketAddr::from(([0, 0, 0, 0], 5000)));
+        assert_eq!(params.protocol, Protocol::Udp);
+
+        assert_eq!(
+            server(&["-p", "tcp", "server", "127.0.0.1:5000"]).protocol,
             Protocol::Tcp
         );
     }
 
     #[test]
-    fn cli_protocol_flag_icmp() {
-        let matches = matches(["rup", "-p", "icmp", "8.8.8.8"]);
-        assert_eq!(
-            *matches.get_one::<Protocol>("protocol").unwrap(),
-            Protocol::Icmp
-        );
-    }
-
-    #[test]
-    fn cli_protocol_flag_http_url() {
-        let params =
-            get_cli_params_from(["rup", "--protocol=http", "https://example.com"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Http1);
-                assert_eq!(params.remote_address, "https://example.com");
-            }
-            _ => panic!("expected pinger params"),
+    fn server_rejects_client_options() {
+        for args in [["-i", "300"], ["--output", "jsonl"], ["--format", "{seq}"]] {
+            let args = [&args[..], &["server", "127.0.0.1:5000"]].concat();
+            assert!(rejects(&args), "{args:?}");
         }
-    }
-
-    #[test]
-    fn cli_protocol_flag_http2() {
-        let matches = matches(["rup", "-p", "http2", "https://example.com"]);
-        assert_eq!(
-            *matches.get_one::<Protocol>("protocol").unwrap(),
-            Protocol::Http2
-        );
-    }
-
-    #[test]
-    fn cli_client_protocol_defaults_to_icmp() {
-        let params = get_cli_params_from(["rup", "8.8.8.8"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Icmp);
-            }
-            _ => panic!("expected pinger params"),
-        }
-    }
-
-    #[test]
-    fn cli_server_protocol_defaults_to_udp() {
-        let params = get_cli_params_from(["rup", "server", "127.0.0.1:5000"]).unwrap();
-
-        match params {
-            CliParams::ServerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Udp);
-            }
-            _ => panic!("expected server params"),
-        }
-    }
-
-    #[test]
-    fn cli_protocol_invalid() {
-        assert!(try_matches(["rup", "-p", "invalid", "127.0.0.1:5000"]).is_err());
-    }
-
-    #[test]
-    fn cli_client_no_remote_fails() {
-        assert!(try_matches(["rup", "-i", "300"]).is_err());
-    }
-
-    #[test]
-    fn cli_ping_number_and_run_time_both_optional() {
-        let matches = matches(["rup", "127.0.0.1:5000"]);
-        assert!(matches.get_one::<u64>("ping-number").is_none());
-        assert!(matches.get_one::<u64>("run-time").is_none());
-    }
-
-    #[test]
-    fn get_cli_params_from_client_args() {
-        let params = get_cli_params_from(["rup", "127.0.0.1", "-i", "300"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Icmp);
-                assert_eq!(params.remote_address, "127.0.0.1");
-                assert_eq!(params.interval, Duration::from_millis(300));
-            }
-            _ => panic!("expected pinger params"),
-        }
-    }
-
-    #[test]
-    fn get_cli_params_from_default_client_args() {
-        let params =
-            get_cli_params_from(["rup", "-p", "tcp", "-n", "2", "127.0.0.1:5000"]).unwrap();
-
-        match params {
-            CliParams::PingerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Tcp);
-                assert_eq!(params.remote_address, "127.0.0.1:5000");
-                assert_eq!(params.ping_number, Some(2));
-                assert_eq!(params.tos, None);
-            }
-            _ => panic!("expected pinger params"),
-        }
-    }
-
-    #[test]
-    fn get_cli_params_from_server_args() {
-        let params = get_cli_params_from(["rup", "-p", "udp", "server", "127.0.0.1:5000"]).unwrap();
-
-        match params {
-            CliParams::ServerParams(params) => {
-                assert_eq!(params.protocol, Protocol::Udp);
-                assert_eq!(
-                    params.local_address,
-                    SocketAddr::from(([127, 0, 0, 1], 5000))
-                );
-            }
-            _ => panic!("expected server params"),
-        }
-    }
-
-    #[test]
-    fn get_cli_params_from_missing_remote_errors() {
-        assert!(get_cli_params_from(["rup"]).is_err());
     }
 }

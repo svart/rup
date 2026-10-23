@@ -8,17 +8,24 @@ use tokio::time::{
 pub const PING_HDR_LEN: usize =
     std::mem::size_of::<u64>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
 
+/// A validated request or response payload size in bytes.
+///
+/// Sizes must be at least [`PacketSize::MIN`], which leaves room for the echo
+/// header shared by the UDP, TCP, and ICMP transports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PacketSize(u16);
 
+/// Error returned when a payload size is smaller than [`PacketSize::MIN`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PacketSizeError {
     value: u16,
 }
 
 impl PacketSize {
+    /// Smallest valid payload size: the encoded echo header length.
     pub const MIN: u16 = PING_HDR_LEN as u16;
 
+    /// Validates `value` and returns it as a `PacketSize`.
     pub fn new(value: u16) -> Result<Self, PacketSizeError> {
         if value >= Self::MIN {
             Ok(Self(value))
@@ -27,6 +34,7 @@ impl PacketSize {
         }
     }
 
+    /// Returns the size in bytes.
     pub const fn get(self) -> u16 {
         self.0
     }
@@ -53,18 +61,27 @@ impl fmt::Display for PacketSizeError {
 
 impl std::error::Error for PacketSizeError {}
 
+/// One echo request produced by the generator and passed to a transport.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// Sequence number used to correlate the response.
     pub id: u64,
+    /// Requested payload size; the transport uses its default when `None`.
     pub request_size: Option<PacketSize>,
+    /// Response size to ask an echo server for; `None` means mirror the request.
     pub response_size: Option<PacketSize>,
 }
 
+/// One reply returned by a transport.
 #[derive(Clone, Debug)]
 pub struct Response {
+    /// Sequence number copied from the request.
     pub id: u64,
+    /// Monotonic time at which the transport received the reply.
     pub timestamp: Instant,
+    /// Reply payload size in bytes; zero for terminal network responses.
     pub size: usize,
+    /// Observed TTL when the transport can read it.
     pub ttl: Option<u8>,
 }
 
@@ -137,7 +154,9 @@ pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, config: Ge
             response_size: config.response_size,
         };
 
+        tracing::trace!(seq = req.id, "generated request");
         if to_tx_transport.send(req).await.is_err() {
+            tracing::debug!("transmitter channel closed; generator stopping");
             break;
         }
 
@@ -147,9 +166,11 @@ pub(crate) async fn generator(to_tx_transport: mpsc::Sender<Request>, config: Ge
         }
 
         if !wait_for_next_request(&mut pacer, stop_at).await {
+            tracing::debug!(sent = id, "generator stopped at run-time limit");
             return;
         }
     }
+    tracing::debug!(sent = id, "generator finished");
 }
 
 async fn wait_for_next_request(pacer: &mut Pacer, stop_at: Option<TokioInstant>) -> bool {

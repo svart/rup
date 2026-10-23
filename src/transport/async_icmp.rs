@@ -118,6 +118,7 @@ pub fn try_parse_icmp_response(
     }))
 }
 
+/// ICMP transport backed by Linux ping sockets, so no root privileges are needed.
 #[derive(Clone)]
 pub struct IcmpClientTransport {
     sock: Arc<UdpSocket>,
@@ -126,10 +127,12 @@ pub struct IcmpClientTransport {
 }
 
 impl IcmpClientTransport {
+    /// Opens an ICMP ping socket bound to `local`.
     pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
         Self::new_with_tos(local, remote, None).await
     }
 
+    /// Like [`IcmpClientTransport::new`], and sets the outgoing TOS byte when given.
     pub async fn new_with_tos(
         local: SocketAddr,
         remote: SocketAddr,
@@ -159,7 +162,7 @@ impl IcmpClientTransport {
             })?;
         }
         if let Err(e) = enable_socket_recv_ttl(&sock, remote) {
-            eprintln!("ICMP received TTL disabled: {e}");
+            tracing::warn!(error = %e, "ICMP received TTL disabled");
         }
         sock.set_nonblocking(true)
             .map_err(|e| io::Error::new(e.kind(), format!("set nonblocking: {e}")))?;

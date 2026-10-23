@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
+use tracing::Instrument;
 
 use crate::http_target::{HttpTarget, HttpVersion};
 use crate::pinger::{self, PacketSize, SendMode};
@@ -45,6 +46,9 @@ impl SessionChannels {
     }
 }
 
+/// Returns `true` when `addr` already contains an explicit port.
+///
+/// Recognizes bracketed IPv6 addresses and bare `host:port` strings.
 pub fn has_port(addr: &str) -> bool {
     if addr.starts_with('[') {
         let after_bracket = addr.split(']').nth(1).unwrap_or("");
@@ -92,20 +96,33 @@ pub fn ensure_port(addr: &str, protocol: Protocol) -> io::Result<String> {
 /// A single RTT measurement result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingResult {
+    /// Sequence number of the request that produced this reply.
     pub seq: u64,
+    /// Measured round-trip time.
     pub rtt: Duration,
     /// When the transport received the reply; the RTT ends at this instant.
     pub received_at: Instant,
+    /// Reply payload size in bytes; zero for terminal network responses.
     pub size: usize,
+    /// Observed TTL when the transport can read it.
     pub ttl: Option<u8>,
 }
 
 /// Live event produced by a running ping session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PingEvent {
+    /// A reply matched a request and produced an RTT sample.
     Reply(PingResult),
-    Timeout { seq: u64 },
-    ReorderOrLoss { seq: u64 },
+    /// The request reached its timeout without a reply.
+    Timeout {
+        /// Sequence number of the timed-out request.
+        seq: u64,
+    },
+    /// A later reply arrived before this request, so it is treated as lost or reordered.
+    ReorderOrLoss {
+        /// Sequence number of the skipped request.
+        seq: u64,
+    },
 }
 
 /// Summary report from a completed ping session.
@@ -116,6 +133,7 @@ pub struct PingReport {
     pub(crate) received: u64,
 }
 
+/// Error returned when a report would contain more samples than sent packets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PingReportError {
     sent: u64,
@@ -134,20 +152,26 @@ impl fmt::Display for PingReportError {
 
 impl std::error::Error for PingReportError {}
 
+/// Full IP TOS / IPv6 traffic class byte applied to outgoing packets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TrafficClass(u8);
 
 impl TrafficClass {
+    /// Wraps a raw TOS / traffic class byte.
     pub const fn new(value: u8) -> Self {
         Self(value)
     }
 
+    /// Returns the raw byte.
     pub const fn as_u8(self) -> u8 {
         self.0
     }
 }
 
 impl PingReport {
+    /// Builds a report from a sent count and the collected RTT samples.
+    ///
+    /// Returns [`PingReportError`] when there are more samples than sent packets.
     pub fn from_rtts(sent: u64, rtts: Vec<Duration>) -> Result<Self, PingReportError> {
         let received = rtts.len() as u64;
         if received > sent {
@@ -160,38 +184,47 @@ impl PingReport {
         })
     }
 
+    /// Number of requests sent.
     pub fn sent(&self) -> u64 {
         self.sent
     }
 
+    /// Number of RTT samples collected.
     pub fn received(&self) -> u64 {
         self.received
     }
 
+    /// RTT samples in completion order.
     pub fn rtts(&self) -> &[Duration] {
         &self.rtts
     }
 
+    /// Packet loss as a percentage (`0.0..=100.0`).
     pub fn loss_pct(&self) -> f64 {
         statistics::loss_pct(self.sent, self.received)
     }
 
+    /// Smallest RTT, or `None` without samples.
     pub fn min(&self) -> Option<Duration> {
         self.rtts.iter().min().copied()
     }
 
+    /// Largest RTT, or `None` without samples.
     pub fn max(&self) -> Option<Duration> {
         self.rtts.iter().max().copied()
     }
 
+    /// Arithmetic mean RTT, or `None` without samples.
     pub fn mean(&self) -> Option<Duration> {
         statistics::mean(&self.rtts)
     }
 
+    /// Median RTT, or `None` without samples.
     pub fn median(&self) -> Option<Duration> {
         statistics::median(&self.rtts)
     }
 
+    /// Population standard deviation of the RTT samples.
     pub fn std_dev(&self) -> Option<Duration> {
         statistics::std_deviation(&self.rtts)
     }
@@ -217,6 +250,7 @@ impl PingSession {
         }
     }
 
+    /// Waits for the next live event, or `None` once the session has ended.
     pub async fn next(&mut self) -> Option<PingEvent> {
         self.events.recv().await
     }
@@ -228,6 +262,9 @@ impl PingSession {
         }
     }
 
+    /// Stops the session, waits for outstanding results, and returns the report.
+    ///
+    /// Events not yet read with [`PingSession::next`] are discarded.
     pub async fn report(mut self) -> io::Result<PingReport> {
         self.stop();
         self.events.close();
@@ -243,14 +280,19 @@ impl PingSession {
 /// Destination of a ping session, with the data that its transport needs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Target {
+    /// UDP echo requests to `addr`.
     Udp(SocketAddr),
+    /// TCP echo requests, or connect probes, to `addr`.
     Tcp(SocketAddr),
-    /// The port is ignored.
+    /// ICMP echo requests to `addr`. The port is ignored.
     Icmp(SocketAddr),
     /// `GET` requests for `url`; `remote` is the resolved address of the URL host.
     Http {
+        /// HTTP version to speak.
         version: HttpVersion,
+        /// Resolved socket address of the URL host.
         remote: SocketAddr,
+        /// Parsed request URL.
         url: HttpTarget,
     },
 }
@@ -291,36 +333,43 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
+    /// Sets the fixed send interval; ignored in adaptive mode.
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
+    /// Sends the next request after the previous reply or timeout.
     pub fn adaptive(mut self) -> Self {
         self.adaptive = true;
         self
     }
 
+    /// Sets how long to wait for each reply.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Sets the request payload size.
     pub fn request_size(mut self, size: PacketSize) -> Self {
         self.request_size = Some(size);
         self
     }
 
+    /// Asks a UDP/TCP echo server for a response of this size.
     pub fn response_size(mut self, size: PacketSize) -> Self {
         self.response_size = Some(size);
         self
     }
 
+    /// Stops generation after `count` requests.
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
     }
 
+    /// Stops generation after `duration`.
     pub fn run_time(mut self, duration: Duration) -> Self {
         self.run_time = Some(duration);
         self
@@ -355,6 +404,7 @@ pub struct Pinger {
 }
 
 impl Pinger {
+    /// Creates a pinger for `target` with [`SessionConfig::default`] settings.
     pub fn new(target: Target) -> Self {
         Pinger {
             local: unspecified_address(target.remote()),
@@ -364,16 +414,19 @@ impl Pinger {
         }
     }
 
+    /// Binds the client socket to `addr` instead of an unspecified address.
     pub fn local(mut self, addr: SocketAddr) -> Self {
         self.local = addr;
         self
     }
 
+    /// Sets the outgoing IP TOS / IPv6 traffic class byte.
     pub fn traffic_class(mut self, traffic_class: TrafficClass) -> Self {
         self.traffic_class = Some(traffic_class);
         self
     }
 
+    /// Replaces the default session settings.
     pub fn session(mut self, session: SessionConfig) -> Self {
         self.session = session;
         self
@@ -434,6 +487,7 @@ async fn spawn_ping_session(
         session,
     } = pinger;
 
+    tracing::debug!(?target, "creating transport");
     match target {
         Target::Udp(remote) => {
             let transport = UdpClientTransport::new_with_tos(local, remote, traffic_class).await?;
@@ -485,7 +539,9 @@ fn spawn_ping_with_transport<T>(
 where
     T: Transport + Clone + Send + 'static,
 {
-    tokio::spawn(run_session(transport, session, events, stop))
+    tokio::spawn(
+        run_session(transport, session, events, stop).instrument(tracing::info_span!("session")),
+    )
 }
 
 async fn run_session<T>(
@@ -499,6 +555,17 @@ where
 {
     let channels = SessionChannels::new();
     let expected_requests = session.count;
+    tracing::debug!(
+        count = ?session.count,
+        interval = ?session.interval,
+        adaptive = session.adaptive,
+        timeout = ?session.timeout,
+        "session starting"
+    );
+    let transmitter_span = tracing::info_span!("transmitter");
+    let receiver_span = tracing::info_span!("receiver");
+    let generator_span = tracing::info_span!("generator");
+    let statistics_span = tracing::info_span!("statistics");
 
     let (send_mode, txtr_gen) = if session.adaptive {
         let (txtr_gen_send, txtr_gen_recv) = mpsc::channel(CHANNEL_CAP);
@@ -512,20 +579,26 @@ where
 
     let transmitter_transport = transport.clone();
     let statistics_sender = channels.transport_to_statista.clone();
-    tasks.spawn(async move {
-        let result = transmitter(
-            transmitter_transport,
-            channels.transmitter_input,
-            statistics_sender,
-        )
-        .await;
-        let _ = sends_done_send.send(()).await;
-        SessionTask::Transmitter(result)
-    });
+    tasks.spawn(
+        async move {
+            let result = transmitter(
+                transmitter_transport,
+                channels.transmitter_input,
+                statistics_sender,
+            )
+            .await;
+            let _ = sends_done_send.send(()).await;
+            SessionTask::Transmitter(result)
+        }
+        .instrument(transmitter_span),
+    );
 
-    tasks.spawn(async move {
-        SessionTask::Receiver(receiver(transport, channels.transport_to_statista).await)
-    });
+    tasks.spawn(
+        async move {
+            SessionTask::Receiver(receiver(transport, channels.transport_to_statista).await)
+        }
+        .instrument(receiver_span),
+    );
 
     let generator_config = pinger::GeneratorConfig {
         send_mode,
@@ -534,44 +607,53 @@ where
         request_size: session.request_size,
         response_size: session.response_size,
     };
-    let generator_task = tasks.spawn(async move {
-        let run = pinger::generator(channels.generator_to_transmitter, generator_config);
-        if let Some(stop) = stop {
-            tokio::select! {
-                _ = run => {}
-                _ = stop => {}
+    let generator_task = tasks.spawn(
+        async move {
+            let run = pinger::generator(channels.generator_to_transmitter, generator_config);
+            if let Some(stop) = stop {
+                tokio::select! {
+                    _ = run => {}
+                    _ = stop => {}
+                }
+            } else {
+                run.await;
             }
-        } else {
-            run.await;
+            SessionTask::Generator
         }
-        SessionTask::Generator
-    });
+        .instrument(generator_span),
+    );
 
     if let Some(events) = events {
-        tasks.spawn(async move {
-            SessionTask::Statistics(
-                statistics::statista_with_events_and_send_done(
-                    channels.statista_input,
-                    sends_done_recv,
-                    txtr_gen,
-                    session.timeout,
-                    events,
+        tasks.spawn(
+            async move {
+                SessionTask::Statistics(
+                    statistics::statista_with_events_and_send_done(
+                        channels.statista_input,
+                        sends_done_recv,
+                        txtr_gen,
+                        session.timeout,
+                        events,
+                    )
+                    .await,
                 )
-                .await,
-            )
-        });
+            }
+            .instrument(statistics_span),
+        );
     } else {
-        tasks.spawn(async move {
-            SessionTask::Statistics(
-                statistics::statista_report_with_send_done(
-                    channels.statista_input,
-                    sends_done_recv,
-                    txtr_gen,
-                    session.timeout,
+        tasks.spawn(
+            async move {
+                SessionTask::Statistics(
+                    statistics::statista_report_with_send_done(
+                        channels.statista_input,
+                        sends_done_recv,
+                        txtr_gen,
+                        session.timeout,
+                    )
+                    .await,
                 )
-                .await,
-            )
-        });
+            }
+            .instrument(statistics_span),
+        );
     }
 
     let mut receiver_error = None;
@@ -608,8 +690,18 @@ where
                 if let Some(error) = receiver_error
                     && (expected_requests != Some(report.sent) || report.received != report.sent)
                 {
+                    tracing::debug!(
+                        sent = report.sent,
+                        received = report.received,
+                        "session failed"
+                    );
                     return Err(error);
                 }
+                tracing::debug!(
+                    sent = report.sent,
+                    received = report.received,
+                    "session finished"
+                );
                 return Ok(report);
             }
         }
@@ -619,10 +711,18 @@ where
         .unwrap_or_else(|| io::Error::other("ping session stopped without producing a report")))
 }
 
+/// Runs an echo server until the process ends.
+///
+/// Supports [`Protocol::Udp`] and [`Protocol::Tcp`]; other protocols return an
+/// [`io::ErrorKind::InvalidInput`] error.
 pub async fn run_server(protocol: Protocol, local: SocketAddr) -> io::Result<()> {
     run_server_until(protocol, local, std::future::pending()).await
 }
 
+/// Runs an echo server until `shutdown` completes.
+///
+/// Supports [`Protocol::Udp`] and [`Protocol::Tcp`]; other protocols return an
+/// [`io::ErrorKind::InvalidInput`] error.
 pub async fn run_server_until(
     protocol: Protocol,
     local: SocketAddr,

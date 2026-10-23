@@ -30,6 +30,8 @@ serde_json = "1"
 socket2 = { version = "0.6.4", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "signal", "sync", "net", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 webpki-roots = { version = "1.0.10", optional = true }
 
 [dev-dependencies]

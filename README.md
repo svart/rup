@@ -32,6 +32,9 @@ rup -p tcp -n 5 127.0.0.1:5000
 # new connection per request; http2 reuses one connection.
 rup --protocol=http https://example.com
 rup -p http2 https://example.com/status
+
+# Pipeline diagnostics go to stderr; stdout stays clean for --output jsonl.
+rup -v -p udp -n 3 127.0.0.1:5000
 ```
 
 UDP/TCP addresses require `host:port`. ICMP accepts `host` or `host:port`; the
@@ -83,8 +86,11 @@ println!(
 
 ```sh
 cargo build
-cargo test
+cargo test                        # includes rustdoc examples
+cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo doc --no-deps
 cargo build --release
 ```
 

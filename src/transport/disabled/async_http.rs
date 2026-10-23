@@ -12,10 +12,15 @@ use crate::http_target::{HttpTarget, HttpVersion};
 use crate::pinger::{Request, Response};
 use crate::transport::Transport;
 
+/// Uninhabited stand-in for the real HTTP transport.
+///
+/// [`HttpClientTransport::connect`] always fails with
+/// [`io::ErrorKind::Unsupported`].
 #[derive(Clone)]
 pub enum HttpClientTransport {}
 
 impl HttpClientTransport {
+    /// Always fails because the `http` feature is disabled.
     pub async fn connect(
         _version: HttpVersion,
         _local: SocketAddr,

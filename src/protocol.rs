@@ -1,18 +1,29 @@
+//! Ping protocol selection shared by the CLI and the library.
+
 use std::fmt;
 use std::str::FromStr;
 
 use crate::http_target::HttpVersion;
 
+/// Network protocol used for a ping session.
+///
+/// Parses the CLI spellings, where `http` is an alias for [`Protocol::Http1`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Protocol {
+    /// UDP echo requests.
     Udp,
+    /// TCP application echo or connect probes.
     Tcp,
+    /// ICMP echo requests using Linux ping sockets.
     Icmp,
+    /// HTTP/1.1 `GET` with a new connection per request.
     Http1,
+    /// HTTP/2 `GET` over one persistent connection.
     Http2,
 }
 
 impl Protocol {
+    /// Accepted CLI spellings, in help-output order.
     pub const VALUES: [&'static str; 5] = [
         Protocol::Tcp.as_str(),
         Protocol::Udp.as_str(),
@@ -21,6 +32,7 @@ impl Protocol {
         Protocol::Http2.as_str(),
     ];
 
+    /// Lowercase protocol name used in CLI arguments and output.
     pub const fn as_str(self) -> &'static str {
         match self {
             Protocol::Udp => "udp",
@@ -31,6 +43,7 @@ impl Protocol {
         }
     }
 
+    /// Returns the HTTP version for the HTTP protocols, or `None` otherwise.
     pub const fn http_version(self) -> Option<HttpVersion> {
         match self {
             Protocol::Http1 => Some(HttpVersion::Http1),
@@ -39,6 +52,7 @@ impl Protocol {
         }
     }
 
+    /// Whether addresses for this protocol must include an explicit port.
     pub fn requires_port(self) -> bool {
         matches!(self, Protocol::Udp | Protocol::Tcp)
     }

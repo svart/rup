@@ -11,13 +11,17 @@ pub enum HttpVersion {
     Http2,
 }
 
+/// URL scheme used by an [`HttpTarget`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HttpScheme {
+    /// Plain HTTP, default port 80.
     Http,
+    /// HTTP over TLS, default port 443.
     Https,
 }
 
 impl HttpScheme {
+    /// Lowercase scheme name used in URLs.
     pub const fn as_str(self) -> &'static str {
         match self {
             HttpScheme::Http => "http",
@@ -25,6 +29,7 @@ impl HttpScheme {
         }
     }
 
+    /// Port used when the URL does not specify one.
     pub const fn default_port(self) -> u16 {
         match self {
             HttpScheme::Http => 80,
@@ -57,18 +62,22 @@ impl HttpTarget {
         }
     }
 
+    /// Scheme parsed from the URL.
     pub fn scheme(&self) -> HttpScheme {
         self.scheme
     }
 
+    /// Host name or IP address, without IPv6 brackets.
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// Explicit port, or the scheme default when the URL omits it.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// Origin-form request path, including the query string when present.
     pub fn path(&self) -> &str {
         &self.path
     }

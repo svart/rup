@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod output;
 mod output_template;
 
 fn main() -> std::process::ExitCode {

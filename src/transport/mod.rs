@@ -13,8 +13,21 @@ pub mod async_icmp;
 pub mod async_tcp;
 pub mod async_udp;
 
+/// A protocol implementation driven by the session pipeline.
+///
+/// `send` and `recv` are called concurrently from separate tasks, so
+/// implementations must be [`Send`] and [`Sync`]. Session dispatch also clones
+/// the transport into the transmitter and receiver tasks. Implementations share
+/// per-session state behind an `Arc` where needed.
+///
+/// The transmitter calls `send` once per [`Request`] and uses the returned
+/// [`Instant`] as the RTT start. The receiver calls `recv` in a loop and stops
+/// at the first `Err`; the session returns that error unless it has a request
+/// count and every request was sent and answered.
 pub trait Transport: Send + Sync {
+    /// Sends one request and returns the instant the RTT measurement starts.
     fn send(&self, req: &Request) -> impl std::future::Future<Output = io::Result<Instant>> + Send;
+    /// Waits for the next response.
     fn recv(&self) -> impl std::future::Future<Output = io::Result<Response>> + Send;
 }
 
@@ -24,18 +37,21 @@ pub(crate) async fn transmitter(
     to_statista: Sender<StatEntry>,
 ) -> io::Result<()> {
     while let Some(req) = from_generator.recv().await {
-        let timestamp = transport
-            .send(&req)
-            .await
-            .map_err(|error| io::Error::new(error.kind(), format!("send failed: {error}")))?;
+        tracing::trace!(seq = req.id, "sending request");
+        let timestamp = transport.send(&req).await.map_err(|error| {
+            tracing::debug!(seq = req.id, %error, "transport send failed");
+            io::Error::new(error.kind(), format!("send failed: {error}"))
+        })?;
         let entry = StatEntry::Open(Entry {
             id: req.id,
             ts: timestamp,
         });
         if to_statista.send(entry).await.is_err() {
+            tracing::debug!("statistics channel closed; transmitter stopping");
             break;
         }
     }
+    tracing::debug!("transmitter finished");
     Ok(())
 }
 
@@ -44,11 +60,13 @@ pub(crate) async fn receiver(
     to_statista: Sender<StatEntry>,
 ) -> io::Result<()> {
     loop {
-        let response = transport
-            .recv()
-            .await
-            .map_err(|error| io::Error::new(error.kind(), format!("receive failed: {error}")))?;
+        let response = transport.recv().await.map_err(|error| {
+            tracing::debug!(%error, "transport receive failed");
+            io::Error::new(error.kind(), format!("receive failed: {error}"))
+        })?;
+        tracing::trace!(seq = response.id, size = response.size, "response received");
         if to_statista.send(StatEntry::Close(response)).await.is_err() {
+            tracing::debug!("statistics channel closed; receiver stopping");
             return Ok(());
         }
     }

@@ -29,6 +29,12 @@ timer rounding do not accumulate; after a stall it resumes one interval later
 instead of bursting. A request due exactly at the run-time limit is not sent.
 Adaptive mode waits for `statista` to signal after either a response or timeout.
 
+Diagnostics use `tracing`; the library never writes to stderr directly. The CLI
+installs a stderr subscriber for the `rup` target at `WARN`, or `TRACE` with
+`-v`, and the session pipeline nests `generator`, `transmitter`, `receiver`, and
+`statistics` spans under a `session` span. Library callers can install their own
+subscriber instead.
+
 Live sessions own an explicit stop channel. The CLI translates Ctrl+C into a
 session stop; the generator closes, the transmitter drains requests already
 queued, and statista settles outstanding replies/timeouts before returning the
@@ -110,9 +116,10 @@ struct layout.
 
 ## Optional Transports
 
-A transport with heavy dependencies sits behind a cargo feature. The only `cfg`
-attributes are the module selection in `src/transport/mod.rs` and the public
-re-export in `src/lib.rs`:
+A transport with heavy dependencies sits behind a cargo feature. The only
+feature-gated `cfg` attributes are the module selection in
+`src/transport/mod.rs` and the public re-export in `src/lib.rs` (platform
+`cfg`s around socket extensions are separate):
 
 ```rust
 #[cfg_attr(not(feature = "http"), path = "disabled/async_http.rs")]

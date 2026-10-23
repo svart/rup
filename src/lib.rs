@@ -1,3 +1,12 @@
+//! A universal pinger library: RTT measurement over UDP, TCP, ICMP, and HTTP(S).
+//!
+//! Start with [`Pinger`] for the high-level session API, or implement
+//! [`Transport`] and call [`run_with_transport`] for a custom protocol. See the
+//! repository's `docs/library.md` for a guide and `docs/architecture.md` for the
+//! internal pipeline.
+
+#![warn(missing_docs)]
+
 mod echo_codec;
 mod http_target;
 mod pinger;

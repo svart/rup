@@ -129,7 +129,7 @@ pub async fn server_transport_until(
                 match result {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("server: recv error: {e}");
+                        tracing::warn!(error = %e, "server receive failed");
                         continue;
                     }
                 }
@@ -146,31 +146,34 @@ pub async fn server_transport_until(
         }
 
         if n < PING_HDR_LEN {
-            eprintln!("server: packet too short from {addr}: {n} bytes");
+            tracing::warn!(%addr, size = n, "server request too short");
             continue;
         }
 
         let req: Echo = match echo_codec::decode_header(&buf[..n]) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("server: failed to deserialize from {addr}: {e}");
+                tracing::warn!(%addr, error = %e, "server request decode failed");
                 continue;
             }
         };
 
+        tracing::trace!(%addr, seq = req.id, size = n, "server echo request");
         let send_buf = echo_codec::encode_response(req);
 
         if let Some(tos_value) = packet_tos
             && let Err(e) = traffic::set_udp_tos(&sock, addr, tos_value)
         {
-            eprintln!(
-                "server: failed to reflect TOS {} to {addr}: {e}",
-                tos_value.as_u8()
+            tracing::warn!(
+                %addr,
+                tos = tos_value.as_u8(),
+                error = %e,
+                "server TOS reflection failed"
             );
         }
 
         if let Err(e) = sock.send_to(&send_buf, addr).await {
-            eprintln!("server: send error to {addr}: {e}");
+            tracing::warn!(%addr, error = %e, "server send failed");
         }
     }
 }
@@ -183,7 +186,7 @@ fn bind_server_socket(local_address: SocketAddr) -> io::Result<UdpSocket> {
     };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     if let Err(e) = traffic::enable_socket_recv_tos(&sock, local_address) {
-        eprintln!("server: received TOS reflection disabled: {e}");
+        tracing::warn!(error = %e, "server received-TOS reflection disabled");
     }
     sock.bind(&local_address.into())?;
     sock.set_nonblocking(true)?;
@@ -192,6 +195,7 @@ fn bind_server_socket(local_address: SocketAddr) -> io::Result<UdpSocket> {
     UdpSocket::from_std(std_sock)
 }
 
+/// UDP transport; replies may also arrive as matching remote ICMP errors.
 #[derive(Clone)]
 pub struct UdpClientTransport {
     socket: Arc<UdpSocket>,
@@ -202,10 +206,12 @@ pub struct UdpClientTransport {
 }
 
 impl UdpClientTransport {
+    /// Binds `local` and connects the UDP socket to `remote`.
     pub async fn new(local: SocketAddr, remote: SocketAddr) -> io::Result<Self> {
         Self::new_with_tos(local, remote, None).await
     }
 
+    /// Like [`UdpClientTransport::new`], and sets the outgoing TOS byte when given.
     pub async fn new_with_tos(
         local: SocketAddr,
         remote: SocketAddr,

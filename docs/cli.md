@@ -36,6 +36,7 @@ rup [OPTIONS] [CLIENT_OPTIONS] <remote-address>
 | `--local-address <addr>` | Local bind address [default: unspecified address matching the remote IP family] |
 | `--output <human|jsonl>` | Output format [default: `human`] |
 | `--format <template>` | Customize each human-readable reply record |
+| `-v`, `--verbose` | Log pipeline diagnostics to stderr |
 
 Examples:
 
@@ -74,6 +75,21 @@ form.
 
 Ctrl+C stops generation of new requests, allows already-sent requests to reply
 or time out, and then emits the normal human or JSONL summary.
+
+## Diagnostics
+
+Warnings from `rup` (for example, a server receiving a malformed request) always
+go to **stderr**. `-v` / `--verbose` adds high-volume diagnostics: session
+lifecycle, per-request send/receive events, timeout expiry, generated events,
+and, in server mode, one event per echoed request. Diagnostics from dependencies
+such as `h2` are filtered out. Stdout is unaffected, so `--output jsonl` remains
+a clean JSON Lines stream. `-v` is a root option, so for `server` it comes
+before the subcommand.
+
+```sh
+rup -v -p udp -n 3 127.0.0.1:5000 2>rup.log
+rup -v server 0.0.0.0:5000
+```
 
 ## Server
 
@@ -162,7 +178,7 @@ The supported fields are:
 | `{size}` | Response size in bytes |
 | `{ttl}` | TTL, or `-` when unavailable |
 | `{status}` | `reply` or `terminal_reply` |
-| `{protocol}` | `icmp`, `udp`, or `tcp` |
+| `{protocol}` | `icmp`, `udp`, `tcp`, `http1`, or `http2` |
 
 The inter-packet interval is measured between the receive timestamps of
 consecutive replies, so it includes gaps left by lost packets. The first reply

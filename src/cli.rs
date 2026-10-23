@@ -18,6 +18,7 @@ const ARG_RUN_TIME: &str = "run-time";
 const ARG_PROTOCOL: &str = "protocol";
 const ARG_OUTPUT: &str = "output";
 const ARG_FORMAT: &str = "format";
+const ARG_VERBOSE: &str = "verbose";
 const CMD_SERVER: &str = "server";
 
 const CLIENT_ARGS: &[&str] = &[
@@ -141,6 +142,13 @@ fn cli() -> Command {
                 .action(ArgAction::Set)
                 .value_parser(clap::value_parser!(ReplyFormat)),
         )
+        .arg(
+            Arg::new(ARG_VERBOSE)
+                .long("verbose")
+                .short('v')
+                .help("Log pipeline diagnostics to stderr")
+                .action(ArgAction::SetTrue),
+        )
         .subcommand(
             Command::new(CMD_SERVER)
                 .about("Receive requests and send them back immediately")
@@ -171,6 +179,7 @@ fn client_arg_used(matches: &clap::ArgMatches) -> bool {
 pub(crate) struct ServerParams {
     pub local_address: SocketAddr,
     pub protocol: Protocol,
+    pub verbose: bool,
 }
 
 pub(crate) struct PingerParams {
@@ -187,6 +196,7 @@ pub(crate) struct PingerParams {
     pub run_time: Option<Duration>,
     pub output: OutputFormat,
     pub format: Option<ReplyFormat>,
+    pub verbose: bool,
 }
 
 pub(crate) enum CliParams {
@@ -225,6 +235,7 @@ where
                     .get_one::<Protocol>(ARG_PROTOCOL)
                     .copied()
                     .unwrap_or(Protocol::Udp),
+                verbose: *matches.get_one::<bool>(ARG_VERBOSE).unwrap(),
             })
         }
         None => CliParams::PingerParams(PingerParams {
@@ -262,6 +273,7 @@ where
                 _ => unreachable!("clap validates output formats"),
             },
             format: matches.get_one::<ReplyFormat>(ARG_FORMAT).cloned(),
+            verbose: *matches.get_one::<bool>(ARG_VERBOSE).unwrap(),
         }),
         _ => unreachable!("clap validates subcommands"),
     })
@@ -322,6 +334,7 @@ mod tests {
         assert_eq!(params.run_time, None);
         assert_eq!(params.output, OutputFormat::Human);
         assert!(params.format.is_none());
+        assert!(!params.verbose);
     }
 
     #[test]
@@ -434,6 +447,14 @@ mod tests {
             "8.8.8.8", "--output", "jsonl", "--format", "{seq}"
         ]));
         assert!(rejects(&["8.8.8.8", "--format", "{rtt_ms:.7}"]));
+    }
+
+    #[test]
+    fn verbose_flag_applies_to_client_and_server() {
+        assert!(client(&["-v", "8.8.8.8"]).verbose);
+        assert!(client(&["8.8.8.8", "--verbose"]).verbose);
+        assert!(server(&["-v", "server", "127.0.0.1:5000"]).verbose);
+        assert!(!server(&["server", "127.0.0.1:5000"]).verbose);
     }
 
     #[test]

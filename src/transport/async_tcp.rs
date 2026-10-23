@@ -68,23 +68,24 @@ async fn server_connection_handler(mut sock: TcpStream) {
                 break;
             }
             Err(TcpServerReadError::Header(e)) => {
-                eprintln!("Error reading from {peer_addr}: {e}");
+                tracing::warn!(%peer_addr, error = %e, "server header read failed");
                 break;
             }
             Err(TcpServerReadError::Payload(e)) => {
-                eprintln!("Error reading request payload from {peer_addr}: {e}");
+                tracing::warn!(%peer_addr, error = %e, "server payload read failed");
                 break;
             }
             Err(TcpServerReadError::Decode(e)) => {
-                eprintln!("Failed to deserialize request from {peer_addr}: {e}");
+                tracing::warn!(%peer_addr, error = %e, "server request decode failed");
                 break;
             }
         };
 
+        tracing::trace!(%peer_addr, seq = req.id, "server echo request");
         let send_buf = echo_codec::encode_response(req);
 
         if let Err(e) = sock.write_all(&send_buf).await {
-            eprintln!("Error sending echo to {peer_addr}: {e}");
+            tracing::warn!(%peer_addr, error = %e, "server send failed");
             break;
         }
     }
@@ -110,7 +111,7 @@ pub async fn server_transport_until(
                     Ok((socket, _)) => {
                         tokio::spawn(server_connection_handler(socket));
                     }
-                    Err(e) => eprintln!("Connection failed: {e}"),
+                    Err(e) => tracing::warn!(error = %e, "server accept failed"),
                 }
             }
             _ = &mut shutdown => {
@@ -159,6 +160,7 @@ enum TcpClientKind {
     Auto(Box<AutoTcpTransport>),
 }
 
+/// TCP transport: rup application echo, or one connect probe per request.
 #[derive(Clone)]
 pub struct TcpClientTransport {
     kind: Arc<TcpClientKind>,
@@ -182,12 +184,14 @@ pub(crate) fn configured_tcp_socket(
 }
 
 impl TcpClientTransport {
+    /// Wraps an already-connected stream and uses the rup echo protocol.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             kind: Arc::new(TcpClientKind::Echo(EchoConnection::new(stream))),
         }
     }
 
+    /// Connects to `remote` and uses the rup echo protocol.
     pub async fn connect(
         local: SocketAddr,
         remote: SocketAddr,

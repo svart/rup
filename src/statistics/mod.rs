@@ -6,7 +6,6 @@ use tokio::time::sleep;
 use crate::pinger::StatEntry;
 use crate::{PingEvent, PingResult};
 
-#[path = "statistics/tracker.rs"]
 mod tracker;
 
 use tracker::MeasurementTracker;
@@ -85,14 +84,17 @@ async fn emit_events(events: Vec<PingEvent>, to_generator: &Option<Sender<()>>, 
     for event in events {
         match event {
             PingEvent::Reply(result) => {
+                tracing::trace!(seq = result.seq, rtt = ?result.rtt, "reply event");
                 signal_generator(to_generator).await;
                 sink.reply(result).await;
             }
             PingEvent::Timeout { seq } => {
+                tracing::trace!(seq, "timeout event");
                 signal_generator(to_generator).await;
                 sink.event(PingEvent::Timeout { seq }).await;
             }
             PingEvent::ReorderOrLoss { seq } => {
+                tracing::trace!(seq, "reorder or loss event");
                 sink.event(PingEvent::ReorderOrLoss { seq }).await;
             }
         }
@@ -134,9 +136,11 @@ async fn run_statista_core(
     let mut tracker = MeasurementTracker::new();
     let mut input_closed = false;
     let mut no_more_sends = false;
+    tracing::debug!(wait_time = ?wait_time, "statistics actor started");
 
     loop {
         if (input_closed || no_more_sends) && tracker.is_settled() {
+            tracing::debug!("statistics actor settled");
             break;
         }
 
@@ -145,6 +149,7 @@ async fn run_statista_core(
         tokio::select! {
             resp = from_transport.recv(), if !input_closed => {
                 let Some(resp) = resp else {
+                    tracing::debug!("statistics input closed");
                     input_closed = true;
                     continue;
                 };
@@ -152,6 +157,7 @@ async fn run_statista_core(
                 emit_events(tracker.ingest(resp), &to_generator, &sink).await;
             }
             _ = recv_send_done(&mut sends_done) => {
+                tracing::debug!("all requests sent; draining pending results");
                 sends_done = None;
                 no_more_sends = true;
                 input_closed |= drain_ready_stat_entries(
@@ -162,6 +168,7 @@ async fn run_statista_core(
                 ).await;
             }
             _ = sleep(timeout.unwrap_or(wait_time)), if timeout.is_some() => {
+                tracing::trace!("expiring timed-out requests");
                 emit_events(
                     tracker.expire(Instant::now(), wait_time),
                     &to_generator,

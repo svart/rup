@@ -7,14 +7,15 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 
 | File | Purpose |
 |------|---------|
-| `src/lib.rs` | Module declarations and intentional public re-exports |
+| `src/lib.rs` | Crate documentation, `missing_docs` lint, module declarations, public re-exports |
 | `src/session.rs` | Public session/config/report API, task supervision, server dispatch |
 | `src/protocol.rs` | `Protocol` enum, parsing, display names, CLI value list |
 | `src/http_target.rs` | Dependency-free HTTP URL parsing (`HttpTarget`, `HttpScheme`, `HttpVersion`) |
 | `src/echo_codec.rs` | Shared UDP/TCP echo payload encoding and decoding |
 | `src/pinger.rs` | Request/response domain types, `Echo`, `SendMode`, request generator |
-| `src/statistics.rs` | RTT matching, timeout handling, live event emission, shared statistics helpers |
+| `src/statistics/mod.rs` | Statistics actor, live event emission, aggregate helpers |
 | `src/statistics/tracker.rs` | Deterministic request/response matching and timeout state |
+| `src/tos.rs` | Outgoing/incoming TOS and traffic-class socket helpers |
 | `src/unix.rs` | Reviewed unsafe boundary for ancillary data and socket-address decoding |
 | `src/transport/mod.rs` | `Transport` trait plus transmitter/receiver adapters |
 | `src/transport/async_udp.rs` | UDP client transport and UDP echo server |
@@ -23,14 +24,17 @@ behavior lives in the library; `src/main.rs` is intentionally thin.
 | `src/transport/async_http.rs` | HTTP/1.1 and HTTP/2 client transport over TCP or rustls (`http` feature) |
 | `src/transport/disabled/async_http.rs` | Stub with the same signatures, used when `http` is disabled |
 | `src/cli.rs` | Clap command definition and CLI parameter extraction |
-| `src/app.rs` | Runtime setup, DNS resolution, session orchestration, and output |
+| `src/app.rs` | Runtime setup, DNS resolution, and session orchestration |
+| `src/output.rs` | Human-readable and JSON Lines rendering of events and reports |
+| `src/output_template.rs` | `--format` parser and reply-field rendering |
 | `src/main.rs` | Binary module wiring and process entry point |
 
 ## Testing
 
 Tests live next to the code they exercise in `#[cfg(test)]` modules.
 
-Run the normal validation set before committing:
+Run the normal validation set before committing. `cargo test` includes the
+rustdoc examples, so keep doctests compiling when you change the public API:
 
 ```sh
 cargo test
@@ -44,7 +48,7 @@ cargo doc --no-deps
 | File | What the tests cover |
 |------|----------------------|
 | `src/pinger.rs` | `Echo` serialization, request generation, interval/adaptive modes, channel shutdown |
-| `src/statistics.rs` | RTT statistics, formatting, entry matching, timeout helper behavior |
+| `src/statistics/mod.rs` | RTT statistics, formatting, event emission, timeout helper behavior |
 | `src/transport/mod.rs` | Transmitter/receiver channel adapters, mock transports, error paths |
 | `src/transport/async_udp.rs` | Echo encoding/parsing and loopback UDP send/receive |
 | `src/transport/async_tcp.rs` | Echo encoding/parsing and loopback TCP send/receive |
@@ -53,6 +57,8 @@ cargo doc --no-deps
 | `src/http_target.rs` | URL parsing, default ports, IPv6 brackets, invalid URLs |
 | `src/cli.rs` | CLI defaults, validation, protocol parsing, server subcommand arguments |
 | `src/session.rs` | Address helpers, report statistics, task failures, and session orchestration |
+| `src/output.rs` | Human/JSONL rendering, inter-packet intervals, timestamp handling |
+| `src/output_template.rs` | Format parsing, precision, escapes, and field rendering |
 | `tests/` | Public API compilation and CLI process behavior |
 
 Some tests bind loopback sockets. In restricted sandboxes they may fail with
@@ -86,6 +92,25 @@ cargo run --release -- -p http2 https://example.com
 
 Remember that `-p` is a root CLI option. For server mode, it must appear before
 the `server` subcommand.
+
+## Debugging
+
+The CLI always installs a `tracing-subscriber` that writes to stderr (never
+stdout, so JSONL stays parseable). It passes only events from the `rup` target:
+`WARN` and above by default, everything with `-v` / `--verbose`. The session
+pipeline emits spans named `session` with `generator`, `transmitter`,
+`receiver`, and `statistics` children, plus one trace event per request,
+response, and derived event. Server loops emit a trace event per echoed request
+and a warning per client error:
+
+```sh
+cargo run -- -v -p udp -n 3 127.0.0.1:5000 2>diagnostics.log
+```
+
+Without `-v` the filter disables debug and trace callsites, so they are
+effectively free.
+For matching bugs, prefer a unit test against `src/statistics/tracker.rs`; it is
+synchronous and needs no sockets or timers.
 
 ## Coverage
 
